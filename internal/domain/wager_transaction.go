@@ -96,20 +96,20 @@ type RehydrateWagerTransactionParams struct {
 
 func NewWagerTransaction(params NewWagerTransactionParams) (*WagerTransaction, error) {
 	if params.Kind == WagerTransactionKindOpening {
-		return nil, ErrInvalidTransactionKind
-	}
+	return nil, ErrInvalidTransactionKind
+}
 
-	if !params.Kind.IsExternal() {
-		return nil, ErrInvalidTransactionKind
-	}
+if !params.Kind.IsExternal() {
+	return nil, ErrInvalidTransactionKind
+}
 
-	if err := validateExternalWagerInput(
-		params.Kind,
-		params.Money,
-		params.ReferenceExternalTransactionID,
-	); err != nil {
-		return nil, err
-	}
+if err := validateExternalWagerInput(
+	params.Kind,
+	params.Money,
+	params.ReferenceExternalTransactionID,
+); err != nil {
+	return nil, err
+}
 
 	if strings.TrimSpace(params.ID) == "" ||
 		strings.TrimSpace(params.ExternalTransactionID) == "" ||
