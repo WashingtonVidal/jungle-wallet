@@ -244,3 +244,90 @@ func TestRehydrateDoesNotReapplyTransition(t *testing.T) {
 		t.Fatal("expected result balance")
 	}
 }
+
+func TestNewWagerTransactionValidatesMoneyByKind(t *testing.T) {
+	tests := []struct {
+		name      string
+		kind      WagerTransactionKind
+		amount    string
+		reference string
+		wantError bool
+	}{
+		{
+			name:      "BET requires positive amount",
+			kind:      WagerTransactionKindBet,
+			amount:    "0.00",
+			wantError: true,
+		},
+		{
+			name:      "WIN requires positive amount",
+			kind:      WagerTransactionKindWin,
+			amount:    "0.00",
+			wantError: true,
+		},
+		{
+			name:      "LOSS accepts zero",
+			kind:      WagerTransactionKindLoss,
+			amount:    "0.00",
+			wantError: false,
+		},
+		{
+			name:      "LOSS rejects positive amount",
+			kind:      WagerTransactionKindLoss,
+			amount:    "1.00",
+			wantError: true,
+		},
+		{
+			name:      "REFUND requires reference",
+			kind:      WagerTransactionKindRefund,
+			amount:    "25.00",
+			wantError: true,
+		},
+		{
+			name:      "REFUND accepts reference",
+			kind:      WagerTransactionKindRefund,
+			amount:    "25.00",
+			reference: "original-bet",
+			wantError: false,
+		},
+		{
+			name:      "ROLLBACK requires reference",
+			kind:      WagerTransactionKindRollback,
+			amount:    "25.00",
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			money, err := Parse(tt.amount, "BRL")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = NewWagerTransaction(NewWagerTransactionParams{
+				ID:                             "transaction-id",
+				ExternalTransactionID:          "external-id",
+				ProviderID:                     "provider-a",
+				IdempotencyKey:                 "provider-a:external-id",
+				PayloadHash:                    "hash",
+				WalletID:                       "wallet-id",
+				PlayerID:                       "player-id",
+				RoundID:                        "round-id",
+				GameID:                         "game-id",
+				Kind:                           tt.kind,
+				Money:                          money,
+				ReferenceExternalTransactionID: tt.reference,
+				CreatedAt:                      time.Now().UTC(),
+			})
+
+			if tt.wantError && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+
+			if !tt.wantError && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}

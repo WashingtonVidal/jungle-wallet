@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -102,6 +103,14 @@ func NewWagerTransaction(params NewWagerTransactionParams) (*WagerTransaction, e
 		return nil, ErrInvalidTransactionKind
 	}
 
+	if err := validateExternalWagerInput(
+		params.Kind,
+		params.Money,
+		params.ReferenceExternalTransactionID,
+	); err != nil {
+		return nil, err
+	}
+
 	if strings.TrimSpace(params.ID) == "" ||
 		strings.TrimSpace(params.ExternalTransactionID) == "" ||
 		strings.TrimSpace(params.ProviderID) == "" ||
@@ -198,6 +207,46 @@ func (k WagerTransactionKind) IsExternal() bool {
 	default:
 		return false
 	}
+}
+
+func validateExternalWagerInput(
+	kind WagerTransactionKind,
+	money Money,
+	referenceExternalTransactionID string,
+) error {
+	if err := money.ValidateExternal(); err != nil {
+		return err
+	}
+
+	switch kind {
+	case WagerTransactionKindBet, WagerTransactionKindWin:
+		if money.Units() <= 0 {
+			return fmt.Errorf("%w: %s amount must be positive", ErrInvalid, kind)
+		}
+
+	case WagerTransactionKindLoss:
+		if money.Units() != 0 {
+			return fmt.Errorf("%w: LOSS amount must be zero", ErrInvalid)
+		}
+
+	case WagerTransactionKindRefund, WagerTransactionKindRollback:
+		if money.Units() <= 0 {
+			return fmt.Errorf("%w: %s amount must be positive", ErrInvalid, kind)
+		}
+
+		if strings.TrimSpace(referenceExternalTransactionID) == "" {
+			return fmt.Errorf(
+				"%w: %s requires reference external transaction id",
+				ErrInvalid,
+				kind,
+			)
+		}
+
+	default:
+		return ErrInvalidTransactionKind
+	}
+
+	return nil
 }
 
 func (s WagerTransactionStatus) IsValid() bool {
