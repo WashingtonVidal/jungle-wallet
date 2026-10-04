@@ -158,8 +158,8 @@ CREATE INDEX wallet_ledger_wallet_created_idx
 
 CREATE TABLE inbox (
     id TEXT PRIMARY KEY,
-    provider_id TEXT NOT NULL,
-    external_transaction_id TEXT NOT NULL,
+    consumer_name TEXT NOT NULL,
+    message_id TEXT NOT NULL,
     payload_hash TEXT NOT NULL,
     payload JSONB NOT NULL,
 
@@ -184,8 +184,8 @@ CREATE TABLE inbox (
     CONSTRAINT inbox_attempts_nonnegative_check
         CHECK (attempts >= 0),
 
-    CONSTRAINT inbox_provider_external_unique
-        UNIQUE (provider_id, external_transaction_id)
+    CONSTRAINT inbox_consumer_message_unique
+        UNIQUE (consumer_name, message_id)
 );
 
 CREATE TABLE outbox (
