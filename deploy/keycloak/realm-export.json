@@ -1,0 +1,30 @@
+{
+  "realm": "jungle-wallet",
+  "enabled": true,
+  "clients": [
+    {
+      "clientId": "provider-a",
+      "name": "Provider A",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "provider-a-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "publicClient": false,
+      "protocol": "openid-connect"
+    },
+    {
+      "clientId": "wallet-internal",
+      "name": "Wallet Internal Service",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "wallet-internal-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "publicClient": false,
+      "protocol": "openid-connect"
+    }
+  ]
+}

@@ -6,8 +6,9 @@ import (
 )
 
 type Config struct {
-	DatabaseURL string
-	HTTPAddress string
+	DatabaseURL   string
+	HTTPAddress   string
+	OIDCIssuerURL string
 }
 
 func New() (*Config, error) {
@@ -21,8 +22,14 @@ func New() (*Config, error) {
 		httpAddress = ":8080"
 	}
 
+	oidcIssuerURL := os.Getenv("OIDC_ISSUER_URL")
+	if oidcIssuerURL == "" {
+		return nil, fmt.Errorf("OIDC_ISSUER_URL is required")
+	}
+
 	return &Config{
-		DatabaseURL: databaseURL,
-		HTTPAddress: httpAddress,
+		DatabaseURL:   databaseURL,
+		HTTPAddress:   httpAddress,
+		OIDCIssuerURL: oidcIssuerURL,
 	}, nil
 }

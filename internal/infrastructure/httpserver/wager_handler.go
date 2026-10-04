@@ -12,6 +12,7 @@ import (
 
 	"jungle-wallet/internal/application"
 	"jungle-wallet/internal/domain"
+	"jungle-wallet/internal/infrastructure/auth"
 )
 
 type processWagerRequest struct {
@@ -64,6 +65,17 @@ func (h *WagerHandler) Process(w http.ResponseWriter, r *http.Request) {
 
 	if err := decoder.Decode(&request); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	if claims.ClientID != request.ProviderID {
+		writeJSONError(w, http.StatusForbidden, "provider is not authorized")
 		return
 	}
 

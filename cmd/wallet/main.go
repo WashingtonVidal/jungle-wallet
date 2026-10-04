@@ -5,6 +5,7 @@ import (
 
 	"jungle-wallet/internal/application"
 	"jungle-wallet/internal/config"
+	"jungle-wallet/internal/infrastructure/auth"
 	"jungle-wallet/internal/infrastructure/httpserver"
 	"jungle-wallet/internal/infrastructure/postgres"
 )
@@ -14,6 +15,7 @@ func main() {
 		fx.Provide(
 			config.New,
 			postgres.NewFromConfig,
+			auth.NewFromConfig,
 
 			postgres.NewWalletRepository,
 			postgres.NewWagerTransactionRepository,
