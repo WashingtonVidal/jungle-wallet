@@ -6,16 +6,21 @@ import (
 	"net/http"
 
 	"go.uber.org/fx"
+
+	"jungle-wallet/internal/config"
 )
 
 type Server struct {
 	server *http.Server
 }
 
-func NewServer(mux *http.ServeMux) *Server {
+func NewServer(
+	cfg *config.Config,
+	mux *http.ServeMux,
+) *Server {
 	return &Server{
 		server: &http.Server{
-			Addr:    ":8080",
+			Addr:    cfg.HTTPAddress,
 			Handler: mux,
 		},
 	}
