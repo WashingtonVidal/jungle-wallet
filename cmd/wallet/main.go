@@ -3,6 +3,7 @@ package main
 import (
 	"go.uber.org/fx"
 
+	"jungle-wallet/internal/application"
 	"jungle-wallet/internal/config"
 	"jungle-wallet/internal/infrastructure/httpserver"
 	"jungle-wallet/internal/infrastructure/postgres"
@@ -13,6 +14,15 @@ func main() {
 		fx.Provide(
 			config.New,
 			postgres.NewFromConfig,
+
+			postgres.NewWalletRepository,
+			postgres.NewWagerTransactionRepository,
+			postgres.NewLedgerRepository,
+			postgres.NewOutboxRepository,
+
+			application.NewProcessWagerService,
+
+			httpserver.NewWagerHandler,
 			httpserver.NewMux,
 			httpserver.NewServer,
 		),

@@ -4,10 +4,13 @@ import (
 	"net/http"
 )
 
-func NewMux() *http.ServeMux {
+func NewMux(
+	wagerHandler *WagerHandler,
+) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", healthHandler)
+	mux.HandleFunc("POST /wagering/transactions", wagerHandler.Process)
 
 	return mux
 }

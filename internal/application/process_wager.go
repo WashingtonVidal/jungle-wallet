@@ -17,6 +17,7 @@ import (
 type ProcessWagerInput struct {
 	ID                             string
 	LedgerID                       string
+	WalletID                       string
 	ExternalTransactionID          string
 	ProviderID                     string
 	IdempotencyKey                 string
@@ -160,6 +161,13 @@ func (s *ProcessWagerService) Execute(
 		walletBefore, err := wallet.State()
 		if err != nil {
 			return err
+		}
+
+		if walletBefore.ID != input.WalletID {
+			return fmt.Errorf(
+				"%w: wallet does not belong to player and currency",
+				domain.ErrInvalid,
+			)
 		}
 
 		transaction, err := domain.NewWagerTransaction(

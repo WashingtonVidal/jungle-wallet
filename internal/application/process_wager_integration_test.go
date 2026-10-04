@@ -77,6 +77,7 @@ func TestProcessWagerBETIntegration(t *testing.T) {
 	result, err := service.Execute(ctx, ProcessWagerInput{
 		ID:                    "transaction-1",
 		LedgerID:              "ledger-1",
+		WalletID:              "wallet-1",
 		ExternalTransactionID: "external-1",
 		ProviderID:            "provider-1",
 		IdempotencyKey:        "idempotency-1",
@@ -294,6 +295,7 @@ func TestProcessWagerBETIdempotentReplay(t *testing.T) {
 	input := ProcessWagerInput{
 		ID:                    "transaction-idempotency",
 		LedgerID:              "ledger-idempotency",
+		WalletID:              "wallet-idempotency",
 		ExternalTransactionID: "external-idempotency",
 		ProviderID:            "provider-idempotency",
 		IdempotencyKey:        "idempotency-key-1",
@@ -455,6 +457,7 @@ func TestProcessWagerConcurrentBetsDoNotOverspend(t *testing.T) {
 	inputA := ProcessWagerInput{
 		ID:                    "transaction-concurrent-a",
 		LedgerID:              "ledger-concurrent-a",
+		WalletID:              "wallet-concurrent",
 		ExternalTransactionID: "external-concurrent-a",
 		ProviderID:            "provider-concurrent",
 		IdempotencyKey:        "idempotency-concurrent-a",
@@ -470,6 +473,7 @@ func TestProcessWagerConcurrentBetsDoNotOverspend(t *testing.T) {
 	inputB := ProcessWagerInput{
 		ID:                    "transaction-concurrent-b",
 		LedgerID:              "ledger-concurrent-b",
+		WalletID:              "wallet-concurrent",
 		ExternalTransactionID: "external-concurrent-b",
 		ProviderID:            "provider-concurrent",
 		IdempotencyKey:        "idempotency-concurrent-b",
