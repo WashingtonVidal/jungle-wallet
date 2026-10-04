@@ -812,3 +812,219 @@ func TestProcessWagerSameBetFiftyTimesConcurrently(t *testing.T) {
 		)
 	}
 }
+
+func TestProcessWagerDifferentWalletsConcurrently(t *testing.T) {
+	ctx := context.Background()
+
+	db, err := postgres.New(ctx, testDatabaseURL)
+	if err != nil {
+		t.Fatalf("connect database: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Pool.Exec(ctx, `
+		TRUNCATE TABLE
+			outbox,
+			inbox,
+			wallet_ledger_entries,
+			wager_transactions,
+			wallets
+		RESTART IDENTITY CASCADE
+	`)
+	if err != nil {
+		t.Fatalf("clean database: %v", err)
+	}
+
+	now := time.Now().UTC()
+
+	initialBalance, err := domain.Parse("100.00", "BRL")
+	if err != nil {
+		t.Fatalf("create initial money: %v", err)
+	}
+
+	walletA, err := domain.NewWallet(
+		"wallet-parallel-a",
+		"player-parallel-a",
+		initialBalance,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("create wallet A: %v", err)
+	}
+
+	walletB, err := domain.NewWallet(
+		"wallet-parallel-b",
+		"player-parallel-b",
+		initialBalance,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("create wallet B: %v", err)
+	}
+
+	wallets := postgres.NewWalletRepository()
+	transactions := postgres.NewWagerTransactionRepository()
+	ledger := postgres.NewLedgerRepository()
+	outbox := postgres.NewOutboxRepository()
+
+	if err := wallets.Insert(ctx, db.Pool, walletA); err != nil {
+		t.Fatalf("insert wallet A: %v", err)
+	}
+
+	if err := wallets.Insert(ctx, db.Pool, walletB); err != nil {
+		t.Fatalf("insert wallet B: %v", err)
+	}
+
+	service := NewProcessWagerService(
+		db,
+		wallets,
+		transactions,
+		ledger,
+		outbox,
+	)
+
+	betAmount, err := domain.Parse("25.00", "BRL")
+	if err != nil {
+		t.Fatalf("create bet money: %v", err)
+	}
+
+	inputA := ProcessWagerInput{
+		ID:                    "transaction-parallel-a",
+		LedgerID:              "ledger-parallel-a",
+		WalletID:              "wallet-parallel-a",
+		ExternalTransactionID: "external-parallel-a",
+		ProviderID:            "provider-parallel",
+		IdempotencyKey:        "idempotency-parallel-a",
+		PayloadHash:           "payload-parallel-a",
+		PlayerID:              "player-parallel-a",
+		RoundID:               "round-parallel-a",
+		GameID:                "game-parallel-a",
+		Kind:                  domain.WagerTransactionKindBet,
+		Money:                 betAmount,
+		CreatedAt:             now.Add(time.Second),
+	}
+
+	inputB := ProcessWagerInput{
+		ID:                    "transaction-parallel-b",
+		LedgerID:              "ledger-parallel-b",
+		WalletID:              "wallet-parallel-b",
+		ExternalTransactionID: "external-parallel-b",
+		ProviderID:            "provider-parallel",
+		IdempotencyKey:        "idempotency-parallel-b",
+		PayloadHash:           "payload-parallel-b",
+		PlayerID:              "player-parallel-b",
+		RoundID:               "round-parallel-b",
+		GameID:                "game-parallel-b",
+		Kind:                  domain.WagerTransactionKindBet,
+		Money:                 betAmount,
+		CreatedAt:             now.Add(time.Second),
+	}
+
+	start := make(chan struct{})
+	errorsCh := make(chan error, 2)
+
+	run := func(input ProcessWagerInput) {
+		<-start
+
+		_, err := service.Execute(ctx, input)
+		errorsCh <- err
+	}
+
+	go run(inputA)
+	go run(inputB)
+
+	close(start)
+
+	for i := 0; i < 2; i++ {
+		if processErr := <-errorsCh; processErr != nil {
+			t.Fatalf("parallel processing failed: %v", processErr)
+		}
+	}
+
+	var balanceA int64
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`SELECT balance_units FROM wallets WHERE id = $1`,
+		"wallet-parallel-a",
+	).Scan(&balanceA)
+	if err != nil {
+		t.Fatalf("query wallet A: %v", err)
+	}
+
+	var balanceB int64
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`SELECT balance_units FROM wallets WHERE id = $1`,
+		"wallet-parallel-b",
+	).Scan(&balanceB)
+	if err != nil {
+		t.Fatalf("query wallet B: %v", err)
+	}
+
+	if balanceA != 7500 {
+		t.Fatalf(
+			"expected wallet A balance 7500, got %d",
+			balanceA,
+		)
+	}
+
+	if balanceB != 7500 {
+		t.Fatalf(
+			"expected wallet B balance 7500, got %d",
+			balanceB,
+		)
+	}
+
+	var transactionCount int
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`SELECT COUNT(*) FROM wager_transactions`,
+	).Scan(&transactionCount)
+	if err != nil {
+		t.Fatalf("count transactions: %v", err)
+	}
+
+	if transactionCount != 2 {
+		t.Fatalf(
+			"expected exactly 2 transactions, got %d",
+			transactionCount,
+		)
+	}
+
+	var ledgerCount int
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`SELECT COUNT(*) FROM wallet_ledger_entries`,
+	).Scan(&ledgerCount)
+	if err != nil {
+		t.Fatalf("count ledger entries: %v", err)
+	}
+
+	if ledgerCount != 2 {
+		t.Fatalf(
+			"expected exactly 2 ledger entries, got %d",
+			ledgerCount,
+		)
+	}
+
+	var outboxCount int
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`SELECT COUNT(*) FROM outbox`,
+	).Scan(&outboxCount)
+	if err != nil {
+		t.Fatalf("count outbox messages: %v", err)
+	}
+
+	if outboxCount != 2 {
+		t.Fatalf(
+			"expected exactly 2 outbox messages, got %d",
+			outboxCount,
+		)
+	}
+}
