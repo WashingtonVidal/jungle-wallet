@@ -610,3 +610,205 @@ func TestProcessWagerConcurrentBetsDoNotOverspend(t *testing.T) {
 		)
 	}
 }
+
+func TestProcessWagerSameBetFiftyTimesConcurrently(t *testing.T) {
+	ctx := context.Background()
+
+	db, err := postgres.New(ctx, testDatabaseURL)
+	if err != nil {
+		t.Fatalf("connect database: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Pool.Exec(ctx, `
+		TRUNCATE TABLE
+			outbox,
+			inbox,
+			wallet_ledger_entries,
+			wager_transactions,
+			wallets
+		RESTART IDENTITY CASCADE
+	`)
+	if err != nil {
+		t.Fatalf("clean database: %v", err)
+	}
+
+	now := time.Now().UTC()
+
+	initialBalance, err := domain.Parse("100.00", "BRL")
+	if err != nil {
+		t.Fatalf("create initial money: %v", err)
+	}
+
+	wallet, err := domain.NewWallet(
+		"wallet-concurrent-idempotency",
+		"player-concurrent-idempotency",
+		initialBalance,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("create wallet: %v", err)
+	}
+
+	wallets := postgres.NewWalletRepository()
+	transactions := postgres.NewWagerTransactionRepository()
+	ledger := postgres.NewLedgerRepository()
+	outbox := postgres.NewOutboxRepository()
+
+	if err := wallets.Insert(ctx, db.Pool, wallet); err != nil {
+		t.Fatalf("insert wallet: %v", err)
+	}
+
+	service := NewProcessWagerService(
+		db,
+		wallets,
+		transactions,
+		ledger,
+		outbox,
+	)
+
+	betAmount, err := domain.Parse("25.00", "BRL")
+	if err != nil {
+		t.Fatalf("create bet money: %v", err)
+	}
+
+	input := ProcessWagerInput{
+		ID:                    "transaction-concurrent-idempotency",
+		LedgerID:              "ledger-concurrent-idempotency",
+		WalletID:              "wallet-concurrent-idempotency",
+		ExternalTransactionID: "external-concurrent-idempotency",
+		ProviderID:            "provider-concurrent-idempotency",
+		IdempotencyKey:        "idempotency-concurrent-idempotency",
+		PayloadHash:           "payload-concurrent-idempotency",
+		PlayerID:              "player-concurrent-idempotency",
+		RoundID:               "round-concurrent-idempotency",
+		GameID:                "game-concurrent-idempotency",
+		Kind:                  domain.WagerTransactionKindBet,
+		Money:                 betAmount,
+		CreatedAt:             now.Add(time.Second),
+	}
+
+	const requestCount = 50
+
+	start := make(chan struct{})
+	resultsCh := make(chan *ProcessWagerResult, requestCount)
+	errorsCh := make(chan error, requestCount)
+
+	run := func() {
+		<-start
+
+		result, err := service.Execute(ctx, input)
+
+		resultsCh <- result
+		errorsCh <- err
+	}
+
+	for i := 0; i < requestCount; i++ {
+		go run()
+	}
+
+	close(start)
+
+	successes := 0
+	replays := 0
+
+	for i := 0; i < requestCount; i++ {
+		result := <-resultsCh
+		processErr := <-errorsCh
+
+		if processErr != nil {
+			t.Fatalf("concurrent request failed: %v", processErr)
+		}
+
+		successes++
+
+		if result.Replay {
+			replays++
+		}
+	}
+
+	if successes != requestCount {
+		t.Fatalf(
+			"expected %d successful requests, got %d",
+			requestCount,
+			successes,
+		)
+	}
+
+	if replays != requestCount-1 {
+		t.Fatalf(
+			"expected %d idempotent replays, got %d",
+			requestCount-1,
+			replays,
+		)
+	}
+
+	var balanceUnits int64
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`SELECT balance_units FROM wallets WHERE id = $1`,
+		"wallet-concurrent-idempotency",
+	).Scan(&balanceUnits)
+	if err != nil {
+		t.Fatalf("query wallet: %v", err)
+	}
+
+	if balanceUnits != 7500 {
+		t.Fatalf(
+			"expected final balance 7500, got %d",
+			balanceUnits,
+		)
+	}
+
+	var transactionCount int
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`SELECT COUNT(*) FROM wager_transactions`,
+	).Scan(&transactionCount)
+	if err != nil {
+		t.Fatalf("count transactions: %v", err)
+	}
+
+	if transactionCount != 1 {
+		t.Fatalf(
+			"expected exactly 1 transaction, got %d",
+			transactionCount,
+		)
+	}
+
+	var ledgerCount int
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`SELECT COUNT(*) FROM wallet_ledger_entries`,
+	).Scan(&ledgerCount)
+	if err != nil {
+		t.Fatalf("count ledger entries: %v", err)
+	}
+
+	if ledgerCount != 1 {
+		t.Fatalf(
+			"expected exactly 1 ledger entry, got %d",
+			ledgerCount,
+		)
+	}
+
+	var outboxCount int
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`SELECT COUNT(*) FROM outbox`,
+	).Scan(&outboxCount)
+	if err != nil {
+		t.Fatalf("count outbox messages: %v", err)
+	}
+
+	if outboxCount != 1 {
+		t.Fatalf(
+			"expected exactly 1 outbox message, got %d",
+			outboxCount,
+		)
+	}
+}

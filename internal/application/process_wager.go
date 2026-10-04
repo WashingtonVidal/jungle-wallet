@@ -158,6 +158,61 @@ func (s *ProcessWagerService) Execute(
 			return err
 		}
 
+		// Re-check persistent idempotency after acquiring the wallet lock.
+		// Another process may have completed the same transaction while
+		// this transaction was waiting for FOR UPDATE.
+		existing, err = s.transactions.FindByProviderAndExternalID(
+			ctx,
+			tx,
+			input.ProviderID,
+			input.ExternalTransactionID,
+		)
+		if err == nil {
+			if existing.PayloadHash() != input.PayloadHash {
+				return fmt.Errorf(
+					"%w: same external transaction with different payload",
+					domain.ErrInvalid,
+				)
+			}
+
+			result = &ProcessWagerResult{
+				Transaction: existing,
+				Replay:      true,
+			}
+
+			return nil
+		}
+
+		if !errors.Is(err, postgres.ErrWagerTransactionNotFound) {
+			return err
+		}
+
+		existing, err = s.transactions.FindByProviderAndIdempotencyKey(
+			ctx,
+			tx,
+			input.ProviderID,
+			input.IdempotencyKey,
+		)
+		if err == nil {
+			if existing.PayloadHash() != input.PayloadHash {
+				return fmt.Errorf(
+					"%w: same idempotency key with different payload",
+					domain.ErrInvalid,
+				)
+			}
+
+			result = &ProcessWagerResult{
+				Transaction: existing,
+				Replay:      true,
+			}
+
+			return nil
+		}
+
+		if !errors.Is(err, postgres.ErrWagerTransactionNotFound) {
+			return err
+		}
+
 		walletBefore, err := wallet.State()
 		if err != nil {
 			return err
