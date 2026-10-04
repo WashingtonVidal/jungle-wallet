@@ -13,6 +13,10 @@ import (
 
 var ErrWagerTransactionNotFound = errors.New("wager transaction not found")
 
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
 type WagerTransactionRepository struct{}
 
 func NewWagerTransactionRepository() *WagerTransactionRepository {
@@ -169,11 +173,100 @@ func (r *WagerTransactionRepository) FindByProviderAndIdempotencyKey(
 	)
 }
 
+func (r *WagerTransactionRepository) FindPendingByReference(
+	ctx context.Context,
+	q Querier,
+	providerID string,
+	referenceExternalTransactionID string,
+) ([]*domain.WagerTransaction, error) {
+	rows, err := q.Query(
+		ctx,
+		`
+		SELECT
+			id,
+			external_transaction_id,
+			provider_id,
+			idempotency_key,
+			payload_hash,
+			wallet_id,
+			player_id,
+			round_id,
+			game_id,
+			kind,
+			amount_units,
+			currency,
+			COALESCE(reference_external_transaction_id, ''),
+			COALESCE(reference_transaction_id, ''),
+			status,
+			result_balance_units,
+			COALESCE(failure_code, ''),
+			created_at,
+			updated_at
+		FROM wager_transactions
+		WHERE provider_id = $1
+		  AND reference_external_transaction_id = $2
+		  AND status = $3
+		ORDER BY created_at, id
+		FOR UPDATE
+		`,
+		providerID,
+		referenceExternalTransactionID,
+		domain.WagerTransactionStatusPendingReference,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"find pending wager transactions by reference: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+
+	var transactions []*domain.WagerTransaction
+
+	for rows.Next() {
+		transaction, err := scanWagerTransaction(rows)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"scan pending wager transaction: %w",
+				err,
+			)
+		}
+
+		transactions = append(transactions, transaction)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf(
+			"iterate pending wager transactions: %w",
+			err,
+		)
+	}
+
+	return transactions, nil
+}
+
 func (r *WagerTransactionRepository) findOne(
 	ctx context.Context,
 	q Querier,
 	query string,
 	args ...any,
+) (*domain.WagerTransaction, error) {
+	transaction, err := scanWagerTransaction(
+		q.QueryRow(ctx, query, args...),
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrWagerTransactionNotFound
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("find wager transaction: %w", err)
+	}
+
+	return transaction, nil
+}
+
+func scanWagerTransaction(
+	row rowScanner,
 ) (*domain.WagerTransaction, error) {
 	var (
 		id                             string
@@ -197,7 +290,7 @@ func (r *WagerTransactionRepository) findOne(
 		updatedAt                      time.Time
 	)
 
-	err := q.QueryRow(ctx, query, args...).Scan(
+	err := row.Scan(
 		&id,
 		&externalTransactionID,
 		&providerID,
@@ -218,13 +311,8 @@ func (r *WagerTransactionRepository) findOne(
 		&createdAt,
 		&updatedAt,
 	)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrWagerTransactionNotFound
-	}
-
 	if err != nil {
-		return nil, fmt.Errorf("find wager transaction: %w", err)
+		return nil, err
 	}
 
 	money, err := domain.FromUnits(amountUnits, currency)

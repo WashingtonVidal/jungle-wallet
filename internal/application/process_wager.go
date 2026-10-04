@@ -362,6 +362,9 @@ func (s *ProcessWagerService) ExecuteTx(
 		return nil, err
 	}
 
+	// A newly processed transaction may satisfy REFUND/ROLLBACK
+	// transactions that arrived before their reference.
+
 	// LOSS has no financial movement, therefore no ledger entry.
 	if movement != nil {
 		if err := s.wallets.Update(
@@ -388,6 +391,28 @@ func (s *ProcessWagerService) ExecuteTx(
 		}
 
 		if err := s.ledger.Insert(ctx, tx, entry); err != nil {
+			return nil, err
+		}
+	}
+
+	pendingTransactions, err := s.transactions.FindPendingByReference(
+		ctx,
+		tx,
+		transaction.ProviderID(),
+		transaction.ExternalTransactionID(),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, pending := range pendingTransactions {
+		if err := s.processPendingReference(
+			ctx,
+			tx,
+			pending,
+			transaction,
+			input.CreatedAt,
+		); err != nil {
 			return nil, err
 		}
 	}
@@ -428,4 +453,138 @@ func (s *ProcessWagerService) ExecuteTx(
 		Transaction: transaction,
 		Replay:      false,
 	}, nil
+}
+
+func (s *ProcessWagerService) processPendingReference(
+	ctx context.Context,
+	tx pgx.Tx,
+	pending *domain.WagerTransaction,
+	referenced *domain.WagerTransaction,
+	now time.Time,
+) error {
+	if pending == nil {
+		return fmt.Errorf("pending wager transaction is required")
+	}
+
+	if referenced == nil {
+		return fmt.Errorf("referenced wager transaction is required")
+	}
+
+	if err := pending.ResolveReference(
+		referenced.ID(),
+		now,
+	); err != nil {
+		return err
+	}
+
+	wallet, err := s.wallets.FindByPlayerAndCurrencyForUpdate(
+		ctx,
+		tx,
+		pending.PlayerID(),
+		pending.Money().Currency(),
+	)
+	if err != nil {
+		return err
+	}
+
+	walletBefore, err := wallet.State()
+	if err != nil {
+		return err
+	}
+
+	movement, err := domain.ApplyReversalMovement(
+		wallet,
+		pending.Kind(),
+		referenced.Kind(),
+		pending.Money(),
+		now,
+	)
+	if err != nil {
+		return err
+	}
+
+	walletAfter, err := wallet.State()
+	if err != nil {
+		return err
+	}
+
+	if err := pending.MarkProcessed(
+		walletAfter.Balance,
+		now,
+	); err != nil {
+		return err
+	}
+
+	if err := s.wallets.Update(
+		ctx,
+		tx,
+		wallet,
+		walletBefore.Version,
+	); err != nil {
+		return err
+	}
+
+	entry, err := domain.NewLedger(domain.LedgerState{
+		ID:            uuid.NewString(),
+		WalletID:      walletBefore.ID,
+		TransactionID: pending.ID(),
+		Direction:     movement.Direction,
+		Money:         pending.Money(),
+		BalanceBefore: movement.BalanceBefore,
+		BalanceAfter:  movement.BalanceAfter,
+		CreatedAt:     now,
+	})
+	if err != nil {
+		return err
+	}
+
+	if err := s.ledger.Insert(
+		ctx,
+		tx,
+		entry,
+	); err != nil {
+		return err
+	}
+
+	if err := s.transactions.Update(
+		ctx,
+		tx,
+		pending,
+	); err != nil {
+		return err
+	}
+
+	eventPayload, err := json.Marshal(wagerProcessedEvent{
+		TransactionID:         pending.ID(),
+		ExternalTransactionID: pending.ExternalTransactionID(),
+		ProviderID:            pending.ProviderID(),
+		PlayerID:              pending.PlayerID(),
+		Kind:                  pending.Kind(),
+		Status:                pending.Status(),
+		OccurredAt:            now.UTC(),
+	})
+	if err != nil {
+		return fmt.Errorf(
+			"marshal pending wager processed event: %w",
+			err,
+		)
+	}
+
+	if err := s.outbox.Insert(
+		ctx,
+		tx,
+		postgres.OutboxMessage{
+			ID:            uuid.NewString(),
+			AggregateType: "WAGER_TRANSACTION",
+			AggregateID:   pending.ID(),
+			EventType:     "WAGER_TRANSACTION_PROCESSED",
+			Payload:       eventPayload,
+			AvailableAt:   now.UTC(),
+			CreatedAt:     now.UTC(),
+		},
+	); err != nil {
+		return err
+	}
+
+	return nil
 }

@@ -1028,3 +1028,188 @@ func TestProcessWagerDifferentWalletsConcurrently(t *testing.T) {
 		)
 	}
 }
+func TestProcessWagerRefundBeforeBetIsEventuallyProcessed(t *testing.T) {
+	ctx := context.Background()
+
+	db, err := postgres.New(ctx, testDatabaseURL)
+	if err != nil {
+		t.Fatalf("connect database: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Pool.Exec(ctx, `
+		TRUNCATE TABLE
+			outbox,
+			inbox,
+			wallet_ledger_entries,
+			wager_transactions,
+			wallets
+		RESTART IDENTITY CASCADE
+	`)
+	if err != nil {
+		t.Fatalf("clean database: %v", err)
+	}
+
+	now := time.Now().UTC()
+
+	initialBalance, err := domain.Parse("100.00", "BRL")
+	if err != nil {
+		t.Fatalf("create initial money: %v", err)
+	}
+
+	wallet, err := domain.NewWallet(
+		"wallet-refund-before-bet",
+		"player-refund-before-bet",
+		initialBalance,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("create wallet: %v", err)
+	}
+
+	wallets := postgres.NewWalletRepository()
+	transactions := postgres.NewWagerTransactionRepository()
+	ledger := postgres.NewLedgerRepository()
+	outbox := postgres.NewOutboxRepository()
+
+	if err := wallets.Insert(ctx, db.Pool, wallet); err != nil {
+		t.Fatalf("insert wallet: %v", err)
+	}
+
+	service := NewProcessWagerService(
+		db,
+		wallets,
+		transactions,
+		ledger,
+		outbox,
+	)
+
+	amount, err := domain.Parse("25.00", "BRL")
+	if err != nil {
+		t.Fatalf("create money: %v", err)
+	}
+
+	// Primeiro chega o REFUND, mas o BET referenciado ainda não existe.
+	refundResult, err := service.Execute(ctx, ProcessWagerInput{
+		ID:                             "refund-before-bet",
+		LedgerID:                       "ledger-refund-before-bet",
+		WalletID:                       "wallet-refund-before-bet",
+		ExternalTransactionID:          "external-refund-before-bet",
+		ProviderID:                     "provider-refund-before-bet",
+		IdempotencyKey:                 "idempotency-refund-before-bet",
+		PayloadHash:                    "payload-refund-before-bet",
+		ReferenceExternalTransactionID: "external-original-bet",
+		PlayerID:                       "player-refund-before-bet",
+		RoundID:                        "round-refund-before-bet",
+		GameID:                         "game-refund-before-bet",
+		Kind:                           domain.WagerTransactionKindRefund,
+		Money:                          amount,
+		CreatedAt:                      now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("process REFUND before BET: %v", err)
+	}
+
+	if refundResult.Transaction.Status() != domain.WagerTransactionStatusPendingReference {
+		t.Fatalf(
+			"expected refund PENDING_REFERENCE, got %s",
+			refundResult.Transaction.Status(),
+		)
+	}
+
+	// Agora chega o BET original.
+	_, err = service.Execute(ctx, ProcessWagerInput{
+		ID:                    "original-bet",
+		LedgerID:              "ledger-original-bet",
+		WalletID:              "wallet-refund-before-bet",
+		ExternalTransactionID: "external-original-bet",
+		ProviderID:            "provider-refund-before-bet",
+		IdempotencyKey:        "idempotency-original-bet",
+		PayloadHash:           "payload-original-bet",
+		PlayerID:              "player-refund-before-bet",
+		RoundID:               "round-refund-before-bet",
+		GameID:                "game-refund-before-bet",
+		Kind:                  domain.WagerTransactionKindBet,
+		Money:                 amount,
+		CreatedAt:             now.Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("process original BET: %v", err)
+	}
+
+	var (
+		refundStatus string
+		referenceID  *string
+		balanceUnits int64
+		ledgerCount  int
+	)
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`
+		SELECT status, reference_transaction_id
+		FROM wager_transactions
+		WHERE id = $1
+		`,
+		"refund-before-bet",
+	).Scan(&refundStatus, &referenceID)
+	if err != nil {
+		t.Fatalf("query refund: %v", err)
+	}
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`
+		SELECT balance_units
+		FROM wallets
+		WHERE id = $1
+		`,
+		"wallet-refund-before-bet",
+	).Scan(&balanceUnits)
+	if err != nil {
+		t.Fatalf("query wallet: %v", err)
+	}
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM wallet_ledger_entries
+		WHERE wallet_id = $1
+		`,
+		"wallet-refund-before-bet",
+	).Scan(&ledgerCount)
+	if err != nil {
+		t.Fatalf("query ledger count: %v", err)
+	}
+
+	if refundStatus != "PROCESSED" {
+		t.Fatalf(
+			"expected refund to become PROCESSED after referenced BET arrives, got %s",
+			refundStatus,
+		)
+	}
+
+	if referenceID == nil || *referenceID != "original-bet" {
+		t.Fatalf(
+			"expected refund reference_transaction_id original-bet, got %v",
+			referenceID,
+		)
+	}
+
+	// 100.00 - 25.00 BET + 25.00 REFUND = 100.00
+	if balanceUnits != 10000 {
+		t.Fatalf(
+			"expected final balance 10000, got %d",
+			balanceUnits,
+		)
+	}
+
+	// Um lançamento do BET + um lançamento do REFUND.
+	if ledgerCount != 2 {
+		t.Fatalf(
+			"expected 2 ledger entries, got %d",
+			ledgerCount,
+		)
+	}
+}
