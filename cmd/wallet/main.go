@@ -8,6 +8,7 @@ import (
 	"jungle-wallet/internal/infrastructure/auth"
 	"jungle-wallet/internal/infrastructure/httpserver"
 	"jungle-wallet/internal/infrastructure/postgres"
+	"jungle-wallet/internal/infrastructure/sqs"
 )
 
 func main() {
@@ -21,6 +22,12 @@ func main() {
 			postgres.NewWagerTransactionRepository,
 			postgres.NewLedgerRepository,
 			postgres.NewOutboxRepository,
+			postgres.NewInboxRepository,
+
+			sqs.NewClientFromConfig,
+			sqs.NewConsumer,
+			sqs.NewWorkerFromDependencies,
+			sqs.NewPublisherFromDependencies,
 
 			application.NewProcessWagerService,
 
@@ -31,6 +38,7 @@ func main() {
 		fx.Invoke(
 			postgres.RegisterDB,
 			httpserver.RegisterLifecycle,
+			sqs.RegisterLifecycle,
 		),
 	).Run()
 }

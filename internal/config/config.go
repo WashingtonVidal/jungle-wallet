@@ -9,6 +9,11 @@ type Config struct {
 	DatabaseURL   string
 	HTTPAddress   string
 	OIDCIssuerURL string
+
+	AWSRegion         string
+	SQSEndpoint       string
+	SQSQueueURL       string
+	SQSOutboxQueueURL string
 }
 
 func New() (*Config, error) {
@@ -27,9 +32,33 @@ func New() (*Config, error) {
 		return nil, fmt.Errorf("OIDC_ISSUER_URL is required")
 	}
 
+	awsRegion := os.Getenv("AWS_REGION")
+	if awsRegion == "" {
+		awsRegion = "us-east-1"
+	}
+
+	sqsEndpoint := os.Getenv("SQS_ENDPOINT")
+	if sqsEndpoint == "" {
+		sqsEndpoint = "http://localhost:4566"
+	}
+
+	sqsQueueURL := os.Getenv("SQS_QUEUE_URL")
+	if sqsQueueURL == "" {
+		sqsQueueURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-transactions.fifo"
+	}
+
+	sqsOutboxQueueURL := os.Getenv("SQS_OUTBOX_QUEUE_URL")
+	if sqsOutboxQueueURL == "" {
+		sqsOutboxQueueURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-events.fifo"
+	}
+
 	return &Config{
-		DatabaseURL:   databaseURL,
-		HTTPAddress:   httpAddress,
-		OIDCIssuerURL: oidcIssuerURL,
+		DatabaseURL:       databaseURL,
+		HTTPAddress:       httpAddress,
+		OIDCIssuerURL:     oidcIssuerURL,
+		AWSRegion:         awsRegion,
+		SQSEndpoint:       sqsEndpoint,
+		SQSQueueURL:       sqsQueueURL,
+		SQSOutboxQueueURL: sqsOutboxQueueURL,
 	}, nil
 }

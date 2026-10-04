@@ -1,0 +1,205 @@
+package sqs
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"time"
+
+	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
+
+	"jungle-wallet/internal/infrastructure/postgres"
+)
+
+const (
+	outboxLeaseSeconds = 30
+	outboxPollInterval = 500 * time.Millisecond
+)
+
+type Publisher struct {
+	client   *awssqs.Client
+	db       *postgres.DB
+	outbox   *postgres.OutboxRepository
+	queueURL string
+}
+
+type outboxEnvelope struct {
+	EventID       string          `json:"eventId"`
+	EventType     string          `json:"eventType"`
+	AggregateType string          `json:"aggregateType"`
+	AggregateID   string          `json:"aggregateId"`
+	OccurredAt    time.Time       `json:"occurredAt"`
+	Data          json.RawMessage `json:"data"`
+}
+
+func NewPublisher(
+	client *awssqs.Client,
+	db *postgres.DB,
+	outbox *postgres.OutboxRepository,
+	queueURL string,
+) *Publisher {
+	return &Publisher{
+		client:   client,
+		db:       db,
+		outbox:   outbox,
+		queueURL: queueURL,
+	}
+}
+
+func (p *Publisher) Run(ctx context.Context) error {
+	if p == nil ||
+		p.client == nil ||
+		p.db == nil ||
+		p.db.Pool == nil ||
+		p.outbox == nil ||
+		p.queueURL == "" {
+		return fmt.Errorf("outbox publisher is not initialized")
+	}
+
+	log.Printf("outbox publisher started queue=%s", p.queueURL)
+
+	for {
+		err := p.publishNext(ctx)
+
+		switch {
+		case err == nil:
+			continue
+
+		case errors.Is(err, postgres.ErrOutboxMessageNotFound):
+			timer := time.NewTimer(outboxPollInterval)
+
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+
+			case <-timer.C:
+			}
+
+		case errors.Is(err, context.Canceled):
+			return nil
+
+		default:
+			log.Printf("outbox publisher error: %v", err)
+
+			timer := time.NewTimer(outboxPollInterval)
+
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+
+			case <-timer.C:
+			}
+		}
+	}
+}
+
+func (p *Publisher) publishNext(ctx context.Context) error {
+	message, err := p.outbox.ClaimNext(
+		ctx,
+		p.db.Pool,
+		outboxLeaseSeconds,
+	)
+	if err != nil {
+		return err
+	}
+
+	envelope := outboxEnvelope{
+		EventID:       message.ID,
+		EventType:     message.EventType,
+		AggregateType: message.AggregateType,
+		AggregateID:   message.AggregateID,
+		OccurredAt:    message.CreatedAt.UTC(),
+		Data:          json.RawMessage(message.Payload),
+	}
+
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		return p.failMessage(
+			ctx,
+			message,
+			fmt.Errorf("marshal outbox envelope: %w", err),
+		)
+	}
+
+	_, err = p.client.SendMessage(
+		ctx,
+		&awssqs.SendMessageInput{
+			QueueUrl:               &p.queueURL,
+			MessageBody:            stringPointer(string(body)),
+			MessageGroupId:         stringPointer(message.AggregateID),
+			MessageDeduplicationId: stringPointer(message.ID),
+		},
+	)
+	if err != nil {
+		return p.failMessage(
+			ctx,
+			message,
+			fmt.Errorf("send outbox message: %w", err),
+		)
+	}
+
+	if err := p.outbox.MarkPublished(
+		ctx,
+		p.db.Pool,
+		message.ID,
+		time.Now().UTC(),
+	); err != nil {
+		return fmt.Errorf("mark published: %w", err)
+	}
+
+	log.Printf(
+		"outbox message published id=%s event=%s",
+		message.ID,
+		message.EventType,
+	)
+
+	return nil
+}
+
+func (p *Publisher) failMessage(
+	ctx context.Context,
+	message *postgres.PendingOutboxMessage,
+	publishErr error,
+) error {
+	backoff := retryBackoff(message.Attempts)
+
+	markErr := p.outbox.MarkFailed(
+		ctx,
+		p.db.Pool,
+		message.ID,
+		publishErr.Error(),
+		time.Now().UTC().Add(backoff),
+	)
+	if markErr != nil {
+		return fmt.Errorf(
+			"publish failed: %v; mark failed: %w",
+			publishErr,
+			markErr,
+		)
+	}
+
+	return publishErr
+}
+
+func retryBackoff(attempts int) time.Duration {
+	switch {
+	case attempts <= 1:
+		return time.Second
+	case attempts == 2:
+		return 2 * time.Second
+	case attempts == 3:
+		return 5 * time.Second
+	case attempts == 4:
+		return 10 * time.Second
+	default:
+		return 30 * time.Second
+	}
+}
+
+func stringPointer(value string) *string {
+	return &value
+}
