@@ -101,6 +101,123 @@ func (s *ProcessWagerService) Execute(
 	return result, nil
 }
 
+func (s *ProcessWagerService) RetryPendingReference(
+	ctx context.Context,
+	leaseSeconds int,
+) (bool, error) {
+	if s == nil ||
+		s.db == nil ||
+		s.wallets == nil ||
+		s.transactions == nil ||
+		s.ledger == nil ||
+		s.outbox == nil {
+		return false, fmt.Errorf(
+			"process wager service is not initialized",
+		)
+	}
+
+	if leaseSeconds <= 0 {
+		return false, fmt.Errorf(
+			"lease seconds must be positive",
+		)
+	}
+
+	processed := false
+
+	err := s.db.WithTx(ctx, func(tx pgx.Tx) error {
+		claim, err := s.transactions.ClaimNextPendingReference(
+			ctx,
+			tx,
+			leaseSeconds,
+		)
+		if errors.Is(
+			err,
+			postgres.ErrWagerTransactionNotFound,
+		) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		pending := claim.Transaction
+
+		referenced, err :=
+			s.transactions.FindByProviderAndExternalID(
+				ctx,
+				tx,
+				pending.ProviderID(),
+				pending.ReferenceExternalTransactionID(),
+			)
+
+		if errors.Is(
+			err,
+			postgres.ErrWagerTransactionNotFound,
+		) {
+			const maxReferenceAttempts = 6
+
+			if claim.Attempts < maxReferenceAttempts {
+				backoff := time.Second * time.Duration(
+					1<<(claim.Attempts-1),
+				)
+
+				nextAttemptAt := time.Now().UTC().Add(backoff)
+
+				if err := s.transactions.SchedulePendingReferenceRetry(
+					ctx,
+					tx,
+					pending.ID(),
+					nextAttemptAt,
+				); err != nil {
+					return err
+				}
+
+				return nil
+			}
+
+			now := time.Now().UTC()
+
+			if err := pending.Reject(
+				"REFERENCE_NOT_FOUND",
+				now,
+			); err != nil {
+				return err
+			}
+
+			if err := s.transactions.Update(
+				ctx,
+				tx,
+				pending,
+			); err != nil {
+				return err
+			}
+
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		if err := s.processPendingReference(
+			ctx,
+			tx,
+			pending,
+			referenced,
+			time.Now().UTC(),
+		); err != nil {
+			return err
+		}
+
+		processed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+
+	return processed, nil
+}
+
 func (s *ProcessWagerService) ExecuteTx(
 	ctx context.Context,
 	tx pgx.Tx,

@@ -30,6 +30,7 @@ func main() {
 			sqs.NewPublisherFromDependencies,
 
 			application.NewProcessWagerService,
+			application.NewPendingReferenceWorker,
 
 			httpserver.NewWagerHandler,
 			httpserver.NewMux,
@@ -39,6 +40,7 @@ func main() {
 			postgres.RegisterDB,
 			httpserver.RegisterLifecycle,
 			sqs.RegisterLifecycle,
+			application.RegisterLifecycle,
 		),
 	).Run()
 }

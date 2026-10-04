@@ -1213,3 +1213,715 @@ func TestProcessWagerRefundBeforeBetIsEventuallyProcessed(t *testing.T) {
 		)
 	}
 }
+
+func TestRetryPendingReferenceProcessesExistingReference(t *testing.T) {
+	ctx := context.Background()
+
+	db, err := postgres.New(ctx, testDatabaseURL)
+	if err != nil {
+		t.Fatalf("connect database: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Pool.Exec(ctx, `
+		TRUNCATE TABLE
+			outbox,
+			inbox,
+			wallet_ledger_entries,
+			wager_transactions,
+			wallets
+		RESTART IDENTITY CASCADE
+	`)
+	if err != nil {
+		t.Fatalf("clean database: %v", err)
+	}
+
+	now := time.Now().UTC()
+
+	initialBalance, err := domain.Parse("75.00", "BRL")
+	if err != nil {
+		t.Fatalf("create initial balance: %v", err)
+	}
+
+	wallet, err := domain.NewWallet(
+		"wallet-retry-pending",
+		"player-retry-pending",
+		initialBalance,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("create wallet: %v", err)
+	}
+
+	wallets := postgres.NewWalletRepository()
+	transactions := postgres.NewWagerTransactionRepository()
+	ledger := postgres.NewLedgerRepository()
+	outbox := postgres.NewOutboxRepository()
+
+	if err := wallets.Insert(
+		ctx,
+		db.Pool,
+		wallet,
+	); err != nil {
+		t.Fatalf("insert wallet: %v", err)
+	}
+
+	// Simula uma BET que já foi processada anteriormente.
+	_, err = db.Pool.Exec(
+		ctx,
+		`
+		INSERT INTO wager_transactions (
+			id,
+			external_transaction_id,
+			provider_id,
+			idempotency_key,
+			payload_hash,
+			wallet_id,
+			player_id,
+			round_id,
+			game_id,
+			kind,
+			amount_units,
+			currency,
+			status,
+			result_balance_units,
+			created_at,
+			updated_at
+		)
+		VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12, $13, $14, $15, $15
+		)
+		`,
+		"transaction-referenced-bet",
+		"external-referenced-bet",
+		"provider-retry-pending",
+		"provider-retry-pending:external-referenced-bet",
+		"payload-referenced-bet",
+		"wallet-retry-pending",
+		"player-retry-pending",
+		"round-retry-pending",
+		"game-retry-pending",
+		domain.WagerTransactionKindBet,
+		2500,
+		"BRL",
+		domain.WagerTransactionStatusProcessed,
+		7500,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("insert referenced BET: %v", err)
+	}
+
+	// Simula um REFUND que chegou antes da referência e ficou pendente.
+	_, err = db.Pool.Exec(
+		ctx,
+		`
+		INSERT INTO wager_transactions (
+			id,
+			external_transaction_id,
+			provider_id,
+			idempotency_key,
+			payload_hash,
+			wallet_id,
+			player_id,
+			round_id,
+			game_id,
+			kind,
+			amount_units,
+			currency,
+			reference_external_transaction_id,
+			status,
+			created_at,
+			updated_at
+		)
+		VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12, $13, $14, $15, $15
+		)
+		`,
+		"transaction-pending-refund",
+		"external-pending-refund",
+		"provider-retry-pending",
+		"provider-retry-pending:external-pending-refund",
+		"payload-pending-refund",
+		"wallet-retry-pending",
+		"player-retry-pending",
+		"round-retry-pending",
+		"game-retry-pending",
+		domain.WagerTransactionKindRefund,
+		2500,
+		"BRL",
+		"external-referenced-bet",
+		domain.WagerTransactionStatusPendingReference,
+		now.Add(time.Second),
+	)
+	if err != nil {
+		t.Fatalf("insert pending REFUND: %v", err)
+	}
+
+	service := NewProcessWagerService(
+		db,
+		wallets,
+		transactions,
+		ledger,
+		outbox,
+	)
+
+	processed, err := service.RetryPendingReference(
+		ctx,
+		30,
+	)
+	if err != nil {
+		t.Fatalf("retry pending reference: %v", err)
+	}
+
+	if !processed {
+		t.Fatal("expected pending reference to be processed")
+	}
+
+	var (
+		status                 string
+		referenceTransactionID string
+		resultBalanceUnits     int64
+		attempts               int
+	)
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`
+		SELECT
+			status,
+			COALESCE(reference_transaction_id, ''),
+			result_balance_units,
+			reference_attempts
+		FROM wager_transactions
+		WHERE id = $1
+		`,
+		"transaction-pending-refund",
+	).Scan(
+		&status,
+		&referenceTransactionID,
+		&resultBalanceUnits,
+		&attempts,
+	)
+	if err != nil {
+		t.Fatalf("query processed REFUND: %v", err)
+	}
+
+	if status != string(domain.WagerTransactionStatusProcessed) {
+		t.Fatalf(
+			"expected REFUND status PROCESSED, got %s",
+			status,
+		)
+	}
+
+	if referenceTransactionID != "transaction-referenced-bet" {
+		t.Fatalf(
+			"expected reference transaction %s, got %s",
+			"transaction-referenced-bet",
+			referenceTransactionID,
+		)
+	}
+
+	if resultBalanceUnits != 10000 {
+		t.Fatalf(
+			"expected result balance 10000, got %d",
+			resultBalanceUnits,
+		)
+	}
+
+	if attempts != 1 {
+		t.Fatalf(
+			"expected exactly 1 reference attempt, got %d",
+			attempts,
+		)
+	}
+
+	var (
+		balanceUnits int64
+		version      int64
+	)
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`
+		SELECT balance_units, version
+		FROM wallets
+		WHERE id = $1
+		`,
+		"wallet-retry-pending",
+	).Scan(
+		&balanceUnits,
+		&version,
+	)
+	if err != nil {
+		t.Fatalf("query wallet: %v", err)
+	}
+
+	if balanceUnits != 10000 {
+		t.Fatalf(
+			"expected wallet balance 10000, got %d",
+			balanceUnits,
+		)
+	}
+
+	if version != 2 {
+		t.Fatalf(
+			"expected wallet version 2, got %d",
+			version,
+		)
+	}
+
+	var ledgerCount int
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM wallet_ledger_entries
+		WHERE transaction_id = $1
+		`,
+		"transaction-pending-refund",
+	).Scan(&ledgerCount)
+	if err != nil {
+		t.Fatalf("count ledger entries: %v", err)
+	}
+
+	if ledgerCount != 1 {
+		t.Fatalf(
+			"expected exactly 1 REFUND ledger entry, got %d",
+			ledgerCount,
+		)
+	}
+
+	var outboxCount int
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM outbox
+		WHERE aggregate_id = $1
+		  AND event_type = 'WAGER_TRANSACTION_PROCESSED'
+		`,
+		"transaction-pending-refund",
+	).Scan(&outboxCount)
+	if err != nil {
+		t.Fatalf("count outbox messages: %v", err)
+	}
+
+	if outboxCount != 1 {
+		t.Fatalf(
+			"expected exactly 1 processed outbox message, got %d",
+			outboxCount,
+		)
+	}
+}
+
+func TestRetryPendingReferenceRejectsAfterMaxAttempts(t *testing.T) {
+	ctx := context.Background()
+
+	db, err := postgres.New(ctx, testDatabaseURL)
+	if err != nil {
+		t.Fatalf("connect database: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Pool.Exec(ctx, `
+		TRUNCATE TABLE
+			outbox,
+			inbox,
+			wallet_ledger_entries,
+			wager_transactions,
+			wallets
+		RESTART IDENTITY CASCADE
+	`)
+	if err != nil {
+		t.Fatalf("clean database: %v", err)
+	}
+
+	now := time.Now().UTC()
+
+	initialBalance, err := domain.Parse("100.00", "BRL")
+	if err != nil {
+		t.Fatalf("create initial balance: %v", err)
+	}
+
+	wallet, err := domain.NewWallet(
+		"wallet-max-attempts",
+		"player-max-attempts",
+		initialBalance,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("create wallet: %v", err)
+	}
+
+	wallets := postgres.NewWalletRepository()
+	transactions := postgres.NewWagerTransactionRepository()
+	ledger := postgres.NewLedgerRepository()
+	outbox := postgres.NewOutboxRepository()
+
+	if err := wallets.Insert(
+		ctx,
+		db.Pool,
+		wallet,
+	); err != nil {
+		t.Fatalf("insert wallet: %v", err)
+	}
+
+	_, err = db.Pool.Exec(
+		ctx,
+		`
+		INSERT INTO wager_transactions (
+			id,
+			external_transaction_id,
+			provider_id,
+			idempotency_key,
+			payload_hash,
+			wallet_id,
+			player_id,
+			round_id,
+			game_id,
+			kind,
+			amount_units,
+			currency,
+			reference_external_transaction_id,
+			status,
+			reference_attempts,
+			reference_next_attempt_at,
+			created_at,
+			updated_at
+		)
+		VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12, $13, $14, $15,
+			NULL, $16, $16
+		)
+		`,
+		"transaction-max-attempts",
+		"refund-max-attempts",
+		"provider-max-attempts",
+		"provider-max-attempts:refund-max-attempts",
+		"payload-max-attempts",
+		"wallet-max-attempts",
+		"player-max-attempts",
+		"round-max-attempts",
+		"game-max-attempts",
+		domain.WagerTransactionKindRefund,
+		2500,
+		"BRL",
+		"bet-that-never-arrived",
+		domain.WagerTransactionStatusPendingReference,
+		5,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("insert pending REFUND: %v", err)
+	}
+
+	service := NewProcessWagerService(
+		db,
+		wallets,
+		transactions,
+		ledger,
+		outbox,
+	)
+
+	processed, err := service.RetryPendingReference(
+		ctx,
+		30,
+	)
+	if err != nil {
+		t.Fatalf("retry pending reference: %v", err)
+	}
+
+	if processed {
+		t.Fatal(
+			"expected missing reference not to be processed",
+		)
+	}
+
+	var (
+		status      string
+		failureCode string
+		attempts    int
+	)
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`
+		SELECT
+			status,
+			COALESCE(failure_code, ''),
+			reference_attempts
+		FROM wager_transactions
+		WHERE id = $1
+		`,
+		"transaction-max-attempts",
+	).Scan(
+		&status,
+		&failureCode,
+		&attempts,
+	)
+	if err != nil {
+		t.Fatalf("query rejected REFUND: %v", err)
+	}
+
+	if attempts != 6 {
+		t.Fatalf(
+			"expected 6 reference attempts, got %d",
+			attempts,
+		)
+	}
+
+	if status != string(domain.WagerTransactionStatusRejected) {
+		t.Fatalf(
+			"expected status REJECTED, got %s",
+			status,
+		)
+	}
+
+	if failureCode != "REFERENCE_NOT_FOUND" {
+		t.Fatalf(
+			"expected failure code REFERENCE_NOT_FOUND, got %s",
+			failureCode,
+		)
+	}
+
+	var balanceUnits int64
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`
+		SELECT balance_units
+		FROM wallets
+		WHERE id = $1
+		`,
+		"wallet-max-attempts",
+	).Scan(&balanceUnits)
+	if err != nil {
+		t.Fatalf("query wallet: %v", err)
+	}
+
+	if balanceUnits != 10000 {
+		t.Fatalf(
+			"expected wallet balance to remain 10000, got %d",
+			balanceUnits,
+		)
+	}
+
+	var ledgerCount int
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM wallet_ledger_entries
+		WHERE transaction_id = $1
+		`,
+		"transaction-max-attempts",
+	).Scan(&ledgerCount)
+	if err != nil {
+		t.Fatalf("count ledger entries: %v", err)
+	}
+
+	if ledgerCount != 0 {
+		t.Fatalf(
+			"expected no ledger entry, got %d",
+			ledgerCount,
+		)
+	}
+}
+
+func TestRetryPendingReferenceSchedulesBackoffWhenReferenceIsMissing(
+	t *testing.T,
+) {
+	ctx := context.Background()
+
+	db, err := postgres.New(ctx, testDatabaseURL)
+	if err != nil {
+		t.Fatalf("connect database: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Pool.Exec(ctx, `
+		TRUNCATE TABLE
+			outbox,
+			inbox,
+			wallet_ledger_entries,
+			wager_transactions,
+			wallets
+		RESTART IDENTITY CASCADE
+	`)
+	if err != nil {
+		t.Fatalf("clean database: %v", err)
+	}
+
+	now := time.Now().UTC()
+
+	initialBalance, err := domain.Parse("100.00", "BRL")
+	if err != nil {
+		t.Fatalf("create initial balance: %v", err)
+	}
+
+	wallet, err := domain.NewWallet(
+		"wallet-backoff",
+		"player-backoff",
+		initialBalance,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("create wallet: %v", err)
+	}
+
+	wallets := postgres.NewWalletRepository()
+	transactions := postgres.NewWagerTransactionRepository()
+	ledger := postgres.NewLedgerRepository()
+	outbox := postgres.NewOutboxRepository()
+
+	if err := wallets.Insert(
+		ctx,
+		db.Pool,
+		wallet,
+	); err != nil {
+		t.Fatalf("insert wallet: %v", err)
+	}
+
+	_, err = db.Pool.Exec(
+		ctx,
+		`
+		INSERT INTO wager_transactions (
+			id,
+			external_transaction_id,
+			provider_id,
+			idempotency_key,
+			payload_hash,
+			wallet_id,
+			player_id,
+			round_id,
+			game_id,
+			kind,
+			amount_units,
+			currency,
+			reference_external_transaction_id,
+			status,
+			reference_attempts,
+			reference_next_attempt_at,
+			created_at,
+			updated_at
+		)
+		VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12, $13, $14, 0,
+			NULL, $15, $15
+		)
+		`,
+		"transaction-backoff",
+		"refund-backoff",
+		"provider-backoff",
+		"provider-backoff:refund-backoff",
+		"payload-backoff",
+		"wallet-backoff",
+		"player-backoff",
+		"round-backoff",
+		"game-backoff",
+		domain.WagerTransactionKindRefund,
+		2500,
+		"BRL",
+		"bet-that-does-not-exist",
+		domain.WagerTransactionStatusPendingReference,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("insert pending REFUND: %v", err)
+	}
+
+	service := NewProcessWagerService(
+		db,
+		wallets,
+		transactions,
+		ledger,
+		outbox,
+	)
+
+	beforeRetry := time.Now().UTC()
+
+	processed, err := service.RetryPendingReference(
+		ctx,
+		30,
+	)
+	if err != nil {
+		t.Fatalf("retry pending reference: %v", err)
+	}
+
+	afterRetry := time.Now().UTC()
+
+	if processed {
+		t.Fatal(
+			"expected missing reference not to be processed",
+		)
+	}
+
+	var (
+		status        string
+		attempts      int
+		nextAttemptAt time.Time
+	)
+
+	err = db.Pool.QueryRow(
+		ctx,
+		`
+		SELECT
+			status,
+			reference_attempts,
+			reference_next_attempt_at
+		FROM wager_transactions
+		WHERE id = $1
+		`,
+		"transaction-backoff",
+	).Scan(
+		&status,
+		&attempts,
+		&nextAttemptAt,
+	)
+	if err != nil {
+		t.Fatalf("query pending REFUND: %v", err)
+	}
+
+	if status != string(
+		domain.WagerTransactionStatusPendingReference,
+	) {
+		t.Fatalf(
+			"expected status PENDING_REFERENCE, got %s",
+			status,
+		)
+	}
+
+	if attempts != 1 {
+		t.Fatalf(
+			"expected 1 reference attempt, got %d",
+			attempts,
+		)
+	}
+
+	earliestExpected := beforeRetry.Add(time.Second)
+	latestExpected := afterRetry.Add(time.Second)
+
+	if nextAttemptAt.Before(earliestExpected) {
+		t.Fatalf(
+			"expected next attempt at or after %s, got %s",
+			earliestExpected,
+			nextAttemptAt,
+		)
+	}
+
+	if nextAttemptAt.After(latestExpected) {
+		t.Fatalf(
+			"expected next attempt at or before %s, got %s",
+			latestExpected,
+			nextAttemptAt,
+		)
+	}
+}
