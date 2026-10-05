@@ -94,22 +94,66 @@ type RehydrateWagerTransactionParams struct {
 	UpdatedAt                      time.Time
 }
 
+type NewOpeningTransactionParams struct {
+	ID        string
+	WalletID  string
+	PlayerID  string
+	Money     Money
+	CreatedAt time.Time
+}
+
+func NewOpeningTransaction(
+	params NewOpeningTransactionParams,
+) (*WagerTransaction, error) {
+	if strings.TrimSpace(params.ID) == "" ||
+		strings.TrimSpace(params.WalletID) == "" ||
+		strings.TrimSpace(params.PlayerID) == "" ||
+		params.CreatedAt.IsZero() {
+		return nil, ErrInvalidTransaction
+	}
+
+	if err := params.Money.ValidateExternal(); err != nil {
+		return nil, err
+	}
+
+	if params.Money.Units() <= 0 {
+		return nil, fmt.Errorf(
+			"%w: OPENING amount must be positive",
+			ErrInvalidTransaction,
+		)
+	}
+
+	resultBalance := params.Money
+
+	return &WagerTransaction{
+		id:            params.ID,
+		walletID:      params.WalletID,
+		playerID:      params.PlayerID,
+		kind:          WagerTransactionKindOpening,
+		money:         params.Money,
+		status:        WagerTransactionStatusProcessed,
+		resultBalance: &resultBalance,
+		createdAt:     params.CreatedAt,
+		updatedAt:     params.CreatedAt,
+	}, nil
+}
+
 func NewWagerTransaction(params NewWagerTransactionParams) (*WagerTransaction, error) {
 	if params.Kind == WagerTransactionKindOpening {
-	return nil, ErrInvalidTransactionKind
-}
+		return nil, ErrInvalidTransactionKind
+	}
 
-if !params.Kind.IsExternal() {
-	return nil, ErrInvalidTransactionKind
-}
+	if !params.Kind.IsExternal() {
+		return nil, ErrInvalidTransactionKind
+	}
 
-if err := validateExternalWagerInput(
-	params.Kind,
-	params.Money,
-	params.ReferenceExternalTransactionID,
-); err != nil {
-	return nil, err
-}
+	if err := validateExternalWagerInput(
+		params.Kind,
+		params.Money,
+		params.ReferenceExternalTransactionID,
+	); err != nil {
+		return nil, err
+	}
 
 	if strings.TrimSpace(params.ID) == "" ||
 		strings.TrimSpace(params.ExternalTransactionID) == "" ||

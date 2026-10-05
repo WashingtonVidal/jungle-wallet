@@ -331,3 +331,70 @@ func TestNewWagerTransactionValidatesMoneyByKind(t *testing.T) {
 		})
 	}
 }
+
+func TestNewOpeningTransaction(t *testing.T) {
+	now := time.Now().UTC()
+
+	money, err := Parse("100.00", "BRL")
+	if err != nil {
+		t.Fatalf("create money: %v", err)
+	}
+
+	transaction, err := NewOpeningTransaction(
+		NewOpeningTransactionParams{
+			ID:        "opening-1",
+			WalletID:  "wallet-1",
+			PlayerID:  "player-1",
+			Money:     money,
+			CreatedAt: now,
+		},
+	)
+	if err != nil {
+		t.Fatalf("create opening transaction: %v", err)
+	}
+
+	if transaction.Kind() != WagerTransactionKindOpening {
+		t.Fatalf(
+			"expected OPENING kind, got %s",
+			transaction.Kind(),
+		)
+	}
+
+	if transaction.Status() != WagerTransactionStatusProcessed {
+		t.Fatalf(
+			"expected PROCESSED status, got %s",
+			transaction.Status(),
+		)
+	}
+
+	if transaction.ResultBalance() == nil {
+		t.Fatal("expected result balance")
+	}
+
+	if transaction.ResultBalance().Units() != 10000 {
+		t.Fatalf(
+			"expected result balance 10000, got %d",
+			transaction.ResultBalance().Units(),
+		)
+	}
+}
+
+func TestNewOpeningTransactionRejectsZeroAmount(t *testing.T) {
+	money, err := Zero("BRL")
+	if err != nil {
+		t.Fatalf("create zero money: %v", err)
+	}
+
+	_, err = NewOpeningTransaction(
+		NewOpeningTransactionParams{
+			ID:        "opening-zero",
+			WalletID:  "wallet-1",
+			PlayerID:  "player-1",
+			Money:     money,
+			CreatedAt: time.Now().UTC(),
+		},
+	)
+	if err == nil {
+		t.Fatal("expected zero OPENING amount to be rejected")
+	}
+}

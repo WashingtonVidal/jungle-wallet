@@ -30,9 +30,11 @@ func main() {
 			sqs.NewPublisherFromDependencies,
 
 			application.NewProcessWagerService,
+			application.NewCreateWalletService,
 			application.NewPendingReferenceWorker,
 
 			httpserver.NewWagerHandler,
+			httpserver.NewWalletHandler,
 			httpserver.NewMux,
 			httpserver.NewServer,
 		),

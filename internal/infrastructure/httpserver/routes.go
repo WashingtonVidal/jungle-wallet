@@ -8,11 +8,17 @@ import (
 
 func NewMux(
 	wagerHandler *WagerHandler,
+	walletHandler *WalletHandler,
 	authenticator *auth.Authenticator,
 ) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", healthHandler)
+
+	mux.HandleFunc(
+		"POST /wallets",
+		walletHandler.Create,
+	)
 
 	mux.HandleFunc(
 		"POST /wagering/transactions",

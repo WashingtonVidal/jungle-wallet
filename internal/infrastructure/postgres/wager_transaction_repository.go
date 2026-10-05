@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"jungle-wallet/internal/domain"
 )
@@ -69,14 +70,14 @@ func (r *WagerTransactionRepository) Insert(
 		)
 		`,
 		transaction.ID(),
-		transaction.ExternalTransactionID(),
-		transaction.ProviderID(),
-		transaction.IdempotencyKey(),
-		transaction.PayloadHash(),
+		nullableString(transaction.ExternalTransactionID()),
+		nullableString(transaction.ProviderID()),
+		nullableString(transaction.IdempotencyKey()),
+		nullableString(transaction.PayloadHash()),
 		transaction.WalletID(),
 		transaction.PlayerID(),
-		transaction.RoundID(),
-		transaction.GameID(),
+		nullableString(transaction.RoundID()),
+		nullableString(transaction.GameID()),
 		transaction.Kind(),
 		transaction.Money().Units(),
 		transaction.Money().Currency(),
@@ -506,14 +507,14 @@ func scanWagerTransaction(
 ) (*domain.WagerTransaction, error) {
 	var (
 		id                             string
-		externalTransactionID          string
-		providerID                     string
-		idempotencyKey                 string
-		payloadHash                    string
+		externalTransactionID          pgtype.Text
+		providerID                     pgtype.Text
+		idempotencyKey                 pgtype.Text
+		payloadHash                    pgtype.Text
 		walletID                       string
 		playerID                       string
-		roundID                        string
-		gameID                         string
+		roundID                        pgtype.Text
+		gameID                         pgtype.Text
 		kind                           domain.WagerTransactionKind
 		amountUnits                    int64
 		currency                       string
@@ -573,14 +574,14 @@ func scanWagerTransaction(
 	transaction, err := domain.RehydrateWagerTransaction(
 		domain.RehydrateWagerTransactionParams{
 			ID:                             id,
-			ExternalTransactionID:          externalTransactionID,
-			ProviderID:                     providerID,
-			IdempotencyKey:                 idempotencyKey,
-			PayloadHash:                    payloadHash,
+			ExternalTransactionID:          externalTransactionID.String,
+			ProviderID:                     providerID.String,
+			IdempotencyKey:                 idempotencyKey.String,
+			PayloadHash:                    payloadHash.String,
 			WalletID:                       walletID,
 			PlayerID:                       playerID,
-			RoundID:                        roundID,
-			GameID:                         gameID,
+			RoundID:                        roundID.String,
+			GameID:                         gameID.String,
 			Kind:                           kind,
 			Money:                          money,
 			ReferenceExternalTransactionID: referenceExternalTransactionID,
