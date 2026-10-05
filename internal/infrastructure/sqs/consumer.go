@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -100,13 +101,14 @@ func (c *Consumer) ProcessMessage(
 
 	payloadHash := hashBytes(rawPayload)
 
-	businessHash, err := wagerPayloadHash(envelope.Data)
+	businessHash, legacyHash, err := wagerPayloadHashes(envelope.Data)
 	if err != nil {
 		return fmt.Errorf("calculate wager payload hash: %w", err)
 	}
 
 	now := time.Now().UTC()
 
+	var result *application.ProcessWagerResult
 	err = c.db.WithTx(ctx, func(tx pgx.Tx) error {
 		inboxMessage := postgres.InboxMessage{
 			ID:           uuid.NewString(),
@@ -141,7 +143,7 @@ func (c *Consumer) ProcessMessage(
 			return err
 		}
 
-		_, err = c.service.ExecuteTx(
+		result, err = c.service.ExecuteTx(
 			ctx,
 			tx,
 			application.ProcessWagerInput{
@@ -152,6 +154,7 @@ func (c *Consumer) ProcessMessage(
 				ProviderID:                     envelope.Data.ProviderID,
 				IdempotencyKey:                 envelope.Data.IdempotencyKey,
 				PayloadHash:                    businessHash,
+				LegacyPayloadHash:              legacyHash,
 				ReferenceExternalTransactionID: envelope.Data.ReferenceExternalTransactionID,
 				PlayerID:                       envelope.Data.PlayerID,
 				RoundID:                        envelope.Data.RoundID,
@@ -181,6 +184,11 @@ func (c *Consumer) ProcessMessage(
 		return err
 	}
 
+	transactionID := ""
+	if result != nil && result.Transaction != nil {
+		transactionID = result.Transaction.ID()
+	}
+	slog.Info("SQS treatment committed", "messageId", envelope.MessageID, "correlationId", transactionID, "transactionId", transactionID, "walletId", envelope.Data.WalletID, "providerId", envelope.Data.ProviderID)
 	return nil
 }
 
@@ -230,7 +238,7 @@ func parseWagerKind(value string) (domain.WagerTransactionKind, error) {
 	}
 }
 
-func wagerPayloadHash(data WagerTransactionData) (string, error) {
+func wagerPayloadHashes(data WagerTransactionData) (string, string, error) {
 	canonical := struct {
 		ProviderID                     string            `json:"providerId"`
 		ExternalTransactionID          string            `json:"externalTransactionId"`
@@ -255,10 +263,10 @@ func wagerPayloadHash(data WagerTransactionData) (string, error) {
 
 	raw, err := json.Marshal(canonical)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
-	return hashBytes(raw), nil
+	return domain.CanonicalPayloadHash(raw)
 }
 
 func hashBytes(value []byte) string {

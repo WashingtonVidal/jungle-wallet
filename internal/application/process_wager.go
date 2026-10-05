@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"jungle-wallet/internal/observability"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,6 +24,7 @@ type ProcessWagerInput struct {
 	ProviderID                     string
 	IdempotencyKey                 string
 	PayloadHash                    string
+	LegacyPayloadHash              string
 	ReferenceExternalTransactionID string
 
 	PlayerID string
@@ -41,8 +44,9 @@ type ProcessWagerResult struct {
 
 type wagerProcessedEvent struct {
 	TransactionID         string                        `json:"transactionId"`
-	ExternalTransactionID string                        `json:"externalTransactionId"`
-	ProviderID            string                        `json:"providerId"`
+	WalletID              string                        `json:"walletId"`
+	ExternalTransactionID string                        `json:"externalTransactionId,omitempty"`
+	ProviderID            string                        `json:"providerId,omitempty"`
 	PlayerID              string                        `json:"playerId"`
 	Kind                  domain.WagerTransactionKind   `json:"kind"`
 	Status                domain.WagerTransactionStatus `json:"status"`
@@ -140,6 +144,7 @@ func (s *ProcessWagerService) RetryPendingReference(
 			return err
 		}
 
+		observability.Inc("reference_retries")
 		pending := claim.Transaction
 
 		referenced, err :=
@@ -153,7 +158,7 @@ func (s *ProcessWagerService) RetryPendingReference(
 		if errors.Is(
 			err,
 			postgres.ErrWagerTransactionNotFound,
-		) {
+		) || (err == nil && !referenced.Status().IsTerminal()) {
 			const maxReferenceAttempts = 6
 
 			if claim.Attempts < maxReferenceAttempts {
@@ -176,23 +181,11 @@ func (s *ProcessWagerService) RetryPendingReference(
 			}
 
 			now := time.Now().UTC()
-
-			if err := pending.Reject(
-				"REFERENCE_NOT_FOUND",
-				now,
-			); err != nil {
-				return err
+			if now.Before(pending.UpdatedAt()) {
+				now = pending.UpdatedAt()
 			}
 
-			if err := s.transactions.Update(
-				ctx,
-				tx,
-				pending,
-			); err != nil {
-				return err
-			}
-
-			return nil
+			return s.reject(ctx, tx, pending, "REFERENCE_NOT_FOUND", now, true)
 		}
 		if err != nil {
 			return err
@@ -222,7 +215,25 @@ func (s *ProcessWagerService) ExecuteTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	input ProcessWagerInput,
-) (*ProcessWagerResult, error) {
+) (result *ProcessWagerResult, err error) {
+	start := time.Now()
+	defer func() {
+		observability.Observe(time.Since(start))
+		if err != nil {
+			if errors.Is(err, domain.ErrIdempotencyConflict) {
+				observability.Inc("idempotency_conflicts")
+			}
+			return
+		}
+		if result != nil {
+			if result.Replay {
+				observability.Inc("duplicates")
+			} else {
+				observability.Inc("transactions_" + string(result.Transaction.Status()))
+			}
+			slog.Info("wager processed", "transactionId", result.Transaction.ID(), "correlationId", result.Transaction.ID(), "walletId", result.Transaction.WalletID(), "providerId", result.Transaction.ProviderID(), "status", result.Transaction.Status(), "replay", result.Replay)
+		}
+	}()
 	if s == nil ||
 		s.wallets == nil ||
 		s.transactions == nil ||
@@ -234,6 +245,9 @@ func (s *ProcessWagerService) ExecuteTx(
 	if tx == nil {
 		return nil, fmt.Errorf("transaction is required")
 	}
+	if input.CreatedAt.IsZero() {
+		return nil, domain.ErrInvalidTransaction
+	}
 
 	// Persistent idempotency check by provider + external transaction ID.
 	existing, err := s.transactions.FindByProviderAndExternalID(
@@ -244,13 +258,20 @@ func (s *ProcessWagerService) ExecuteTx(
 	)
 
 	if err == nil {
-		if existing.PayloadHash() != input.PayloadHash {
+		if existing.PayloadHash() != input.PayloadHash && existing.PayloadHash() != input.LegacyPayloadHash {
 			return nil, fmt.Errorf(
 				"%w: same external transaction with different payload",
-				domain.ErrInvalid,
+				domain.ErrIdempotencyConflict,
 			)
 		}
 
+		keyed, keyErr := s.transactions.FindByProviderAndIdempotencyKey(ctx, tx, input.ProviderID, input.IdempotencyKey)
+		if keyErr != nil && !errors.Is(keyErr, postgres.ErrWagerTransactionNotFound) {
+			return nil, keyErr
+		}
+		if keyErr == nil && keyed.ID() != existing.ID() {
+			return nil, domain.ErrIdempotencyConflict
+		}
 		return &ProcessWagerResult{
 			Transaction: existing,
 			Replay:      true,
@@ -271,13 +292,20 @@ func (s *ProcessWagerService) ExecuteTx(
 	)
 
 	if err == nil {
-		if existing.PayloadHash() != input.PayloadHash {
+		if existing.PayloadHash() != input.PayloadHash && existing.PayloadHash() != input.LegacyPayloadHash {
 			return nil, fmt.Errorf(
 				"%w: same idempotency key with different payload",
-				domain.ErrInvalid,
+				domain.ErrIdempotencyConflict,
 			)
 		}
 
+		keyed, keyErr := s.transactions.FindByProviderAndIdempotencyKey(ctx, tx, input.ProviderID, input.IdempotencyKey)
+		if keyErr != nil && !errors.Is(keyErr, postgres.ErrWagerTransactionNotFound) {
+			return nil, keyErr
+		}
+		if keyErr == nil && keyed.ID() != existing.ID() {
+			return nil, domain.ErrIdempotencyConflict
+		}
 		return &ProcessWagerResult{
 			Transaction: existing,
 			Replay:      true,
@@ -309,13 +337,20 @@ func (s *ProcessWagerService) ExecuteTx(
 		input.ExternalTransactionID,
 	)
 	if err == nil {
-		if existing.PayloadHash() != input.PayloadHash {
+		if existing.PayloadHash() != input.PayloadHash && existing.PayloadHash() != input.LegacyPayloadHash {
 			return nil, fmt.Errorf(
 				"%w: same external transaction with different payload",
-				domain.ErrInvalid,
+				domain.ErrIdempotencyConflict,
 			)
 		}
 
+		keyed, keyErr := s.transactions.FindByProviderAndIdempotencyKey(ctx, tx, input.ProviderID, input.IdempotencyKey)
+		if keyErr != nil && !errors.Is(keyErr, postgres.ErrWagerTransactionNotFound) {
+			return nil, keyErr
+		}
+		if keyErr == nil && keyed.ID() != existing.ID() {
+			return nil, domain.ErrIdempotencyConflict
+		}
 		return &ProcessWagerResult{
 			Transaction: existing,
 			Replay:      true,
@@ -333,13 +368,20 @@ func (s *ProcessWagerService) ExecuteTx(
 		input.IdempotencyKey,
 	)
 	if err == nil {
-		if existing.PayloadHash() != input.PayloadHash {
+		if existing.PayloadHash() != input.PayloadHash && existing.PayloadHash() != input.LegacyPayloadHash {
 			return nil, fmt.Errorf(
 				"%w: same idempotency key with different payload",
-				domain.ErrInvalid,
+				domain.ErrIdempotencyConflict,
 			)
 		}
 
+		keyed, keyErr := s.transactions.FindByProviderAndIdempotencyKey(ctx, tx, input.ProviderID, input.IdempotencyKey)
+		if keyErr != nil && !errors.Is(keyErr, postgres.ErrWagerTransactionNotFound) {
+			return nil, keyErr
+		}
+		if keyErr == nil && keyed.ID() != existing.ID() {
+			return nil, domain.ErrIdempotencyConflict
+		}
 		return &ProcessWagerResult{
 			Transaction: existing,
 			Replay:      true,
@@ -355,6 +397,9 @@ func (s *ProcessWagerService) ExecuteTx(
 		return nil, err
 	}
 
+	if input.CreatedAt.Before(walletBefore.UpdatedAt) {
+		input.CreatedAt = walletBefore.UpdatedAt
+	}
 	if walletBefore.ID != input.WalletID {
 		return nil, fmt.Errorf(
 			"%w: wallet does not belong to player and currency",
@@ -389,7 +434,41 @@ func (s *ProcessWagerService) ExecuteTx(
 	case domain.WagerTransactionKindBet,
 		domain.WagerTransactionKindWin,
 		domain.WagerTransactionKindLoss:
-
+		if input.Kind == domain.WagerTransactionKindWin && input.ReferenceExternalTransactionID != "" {
+			ref, err := s.transactions.FindByProviderAndExternalID(ctx, tx, input.ProviderID, input.ReferenceExternalTransactionID)
+			code := ""
+			if errors.Is(err, postgres.ErrWagerTransactionNotFound) {
+				code = "REFERENCE_PENDING"
+			} else if err != nil {
+				return nil, err
+			} else {
+				code, err = s.validateReference(ctx, tx, transaction, ref)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if code == "REFERENCE_PENDING" {
+				if err := transaction.MarkPendingReference(input.CreatedAt); err != nil {
+					return nil, err
+				}
+				if err := s.transactions.Insert(ctx, tx, transaction); err != nil {
+					return nil, err
+				}
+				if err := s.statusEvent(ctx, tx, transaction, "WAGER_TRANSACTION_PENDING_REFERENCE", input.CreatedAt); err != nil {
+					return nil, err
+				}
+				return &ProcessWagerResult{Transaction: transaction}, nil
+			}
+			if code != "" {
+				if err := s.reject(ctx, tx, transaction, code, input.CreatedAt, false); err != nil {
+					return nil, err
+				}
+				return &ProcessWagerResult{Transaction: transaction}, nil
+			}
+			if err := transaction.ResolveReference(ref.ID(), input.CreatedAt); err != nil {
+				return nil, err
+			}
+		}
 		movement, err = domain.ApplyWagerMovement(
 			wallet,
 			input.Kind,
@@ -397,7 +476,17 @@ func (s *ProcessWagerService) ExecuteTx(
 			input.CreatedAt,
 		)
 		if err != nil {
-			return nil, err
+			code := "INVALID_OPERATION"
+			if errors.Is(err, domain.ErrInsufficient) {
+				code = "INSUFFICIENT_BALANCE"
+			}
+			if errors.Is(err, domain.ErrOverflow) {
+				code = "BALANCE_OVERFLOW"
+			}
+			if rejectErr := s.reject(ctx, tx, transaction, code, input.CreatedAt, false); rejectErr != nil {
+				return nil, rejectErr
+			}
+			return &ProcessWagerResult{Transaction: transaction}, nil
 		}
 
 	case domain.WagerTransactionKindRefund,
@@ -428,6 +517,9 @@ func (s *ProcessWagerService) ExecuteTx(
 					return nil, err
 				}
 
+				if err := s.statusEvent(ctx, tx, transaction, "WAGER_TRANSACTION_PENDING_REFERENCE", input.CreatedAt); err != nil {
+					return nil, err
+				}
 				return &ProcessWagerResult{
 					Transaction: transaction,
 					Replay:      false,
@@ -437,6 +529,28 @@ func (s *ProcessWagerService) ExecuteTx(
 			return nil, findErr
 		}
 
+		code, err := s.validateReference(ctx, tx, transaction, referenced)
+		if err != nil {
+			return nil, err
+		}
+		if code == "REFERENCE_PENDING" {
+			if err := transaction.MarkPendingReference(input.CreatedAt); err != nil {
+				return nil, err
+			}
+			if err := s.transactions.Insert(ctx, tx, transaction); err != nil {
+				return nil, err
+			}
+			if err := s.statusEvent(ctx, tx, transaction, "WAGER_TRANSACTION_PENDING_REFERENCE", input.CreatedAt); err != nil {
+				return nil, err
+			}
+			return &ProcessWagerResult{Transaction: transaction}, nil
+		}
+		if code != "" {
+			if err := s.reject(ctx, tx, transaction, code, input.CreatedAt, false); err != nil {
+				return nil, err
+			}
+			return &ProcessWagerResult{Transaction: transaction}, nil
+		}
 		if err := transaction.ResolveReference(
 			referenced.ID(),
 			input.CreatedAt,
@@ -452,7 +566,17 @@ func (s *ProcessWagerService) ExecuteTx(
 			input.CreatedAt,
 		)
 		if err != nil {
-			return nil, err
+			code := "INVALID_REVERSAL"
+			if errors.Is(err, domain.ErrInsufficient) {
+				code = "REVERSAL_INSUFFICIENT_BALANCE"
+			}
+			if errors.Is(err, domain.ErrOverflow) {
+				code = "BALANCE_OVERFLOW"
+			}
+			if err := s.reject(ctx, tx, transaction, code, input.CreatedAt, false); err != nil {
+				return nil, err
+			}
+			return &ProcessWagerResult{Transaction: transaction}, nil
 		}
 
 	default:
@@ -510,6 +634,9 @@ func (s *ProcessWagerService) ExecuteTx(
 		if err := s.ledger.Insert(ctx, tx, entry); err != nil {
 			return nil, err
 		}
+		if err := s.balanceEvent(ctx, tx, transaction, movement, walletAfter.Version, input.CreatedAt); err != nil {
+			return nil, err
+		}
 	}
 
 	pendingTransactions, err := s.transactions.FindPendingByReference(
@@ -536,6 +663,7 @@ func (s *ProcessWagerService) ExecuteTx(
 
 	eventPayload, err := json.Marshal(wagerProcessedEvent{
 		TransactionID:         transaction.ID(),
+		WalletID:              transaction.WalletID(),
 		ExternalTransactionID: transaction.ExternalTransactionID(),
 		ProviderID:            transaction.ProviderID(),
 		PlayerID:              transaction.PlayerID(),
@@ -587,6 +715,19 @@ func (s *ProcessWagerService) processPendingReference(
 		return fmt.Errorf("referenced wager transaction is required")
 	}
 
+	if now.Before(pending.UpdatedAt()) {
+		now = pending.UpdatedAt()
+	}
+	code, err := s.validateReference(ctx, tx, pending, referenced)
+	if err != nil {
+		return err
+	}
+	if code == "REFERENCE_PENDING" {
+		return s.transactions.SchedulePendingReferenceRetry(ctx, tx, pending.ID(), now.Add(time.Second))
+	}
+	if code != "" {
+		return s.reject(ctx, tx, pending, code, now, true)
+	}
 	if err := pending.ResolveReference(
 		referenced.ID(),
 		now,
@@ -609,15 +750,24 @@ func (s *ProcessWagerService) processPendingReference(
 		return err
 	}
 
-	movement, err := domain.ApplyReversalMovement(
-		wallet,
-		pending.Kind(),
-		referenced.Kind(),
-		pending.Money(),
-		now,
-	)
+	if now.Before(walletBefore.UpdatedAt) {
+		now = walletBefore.UpdatedAt
+	}
+	var movement *domain.WagerMovement
+	if pending.Kind() == domain.WagerTransactionKindWin {
+		movement, err = domain.ApplyWagerMovement(wallet, pending.Kind(), pending.Money(), now)
+	} else {
+		movement, err = domain.ApplyReversalMovement(wallet, pending.Kind(), referenced.Kind(), pending.Money(), now)
+	}
 	if err != nil {
-		return err
+		code := "INVALID_REVERSAL"
+		if errors.Is(err, domain.ErrInsufficient) {
+			code = "REVERSAL_INSUFFICIENT_BALANCE"
+		}
+		if errors.Is(err, domain.ErrOverflow) {
+			code = "BALANCE_OVERFLOW"
+		}
+		return s.reject(ctx, tx, pending, code, now, true)
 	}
 
 	walletAfter, err := wallet.State()
@@ -671,8 +821,12 @@ func (s *ProcessWagerService) processPendingReference(
 		return err
 	}
 
+	if err := s.balanceEvent(ctx, tx, pending, movement, walletAfter.Version, now); err != nil {
+		return err
+	}
 	eventPayload, err := json.Marshal(wagerProcessedEvent{
 		TransactionID:         pending.ID(),
+		WalletID:              pending.WalletID(),
 		ExternalTransactionID: pending.ExternalTransactionID(),
 		ProviderID:            pending.ProviderID(),
 		PlayerID:              pending.PlayerID(),

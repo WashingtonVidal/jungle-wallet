@@ -285,7 +285,7 @@ func (r *WagerTransactionRepository) ClaimNextPendingReference(
 			reference_attempts = wt.reference_attempts + 1,
 			reference_next_attempt_at =
 				NOW() + ($2 * INTERVAL '1 second'),
-			updated_at = NOW()
+			updated_at = GREATEST(wt.updated_at, NOW())
 		FROM candidate
 		WHERE wt.id = candidate.id
 		RETURNING
@@ -355,7 +355,7 @@ func (r *WagerTransactionRepository) SchedulePendingReferenceRetry(
 		UPDATE wager_transactions
 		SET
 			reference_next_attempt_at = $1,
-			updated_at = $1
+			updated_at = GREATEST(updated_at, NOW())
 		WHERE id = $2
 		  AND status = $3
 		`,

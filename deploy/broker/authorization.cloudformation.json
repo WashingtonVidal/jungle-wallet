@@ -1,0 +1,495 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Dedicated Jungle Wallet broker authorization validation with least-privilege roles; no application database changes.",
+  "Parameters": {
+    "TrustedPrincipalArn": {
+      "Type": "String",
+      "Description": "Existing IAM user/role permitted to assume test roles; never public trust.",
+      "AllowedPattern": "arn:aws(-us-gov|-cn)?:iam::[0-9]{12}:(user|role)/.+"
+    },
+    "QueuePrefix": {
+      "Type": "String",
+      "Default": "jungle-wallet-auth-validation",
+      "MaxLength": 60,
+      "AllowedPattern": "jungle-wallet-auth-validation(-[a-z0-9-]+)?"
+    }
+  },
+  "Resources": {
+    "DeadLetterQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${QueuePrefix}-dlq.fifo"
+        },
+        "FifoQueue": true,
+        "ContentBasedDeduplication": false
+      }
+    },
+    "RequestQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${QueuePrefix}-requests.fifo"
+        },
+        "FifoQueue": true,
+        "ContentBasedDeduplication": false,
+        "VisibilityTimeout": 30,
+        "ReceiveMessageWaitTimeSeconds": 20,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "DeadLetterQueue",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": 5
+        }
+      }
+    },
+    "EventQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${QueuePrefix}-events.fifo"
+        },
+        "FifoQueue": true,
+        "ContentBasedDeduplication": false
+      }
+    },
+    "ProducerRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Ref": "TrustedPrincipalArn"
+                }
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "QueueLeastPrivilege",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:SendMessage"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "RequestQueue",
+                      "Arn"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "WalletRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Ref": "TrustedPrincipalArn"
+                }
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "QueueLeastPrivilege",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:ChangeMessageVisibility",
+                    "sqs:GetQueueAttributes",
+                    "sqs:GetQueueUrl"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "RequestQueue",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:SendMessage",
+                    "sqs:GetQueueAttributes",
+                    "sqs:GetQueueUrl"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "EventQueue",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:GetQueueAttributes",
+                    "sqs:GetQueueUrl"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "DeadLetterQueue",
+                      "Arn"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "EventReaderRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Ref": "TrustedPrincipalArn"
+                }
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "QueueLeastPrivilege",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:ChangeMessageVisibility",
+                    "sqs:GetQueueAttributes",
+                    "sqs:GetQueueUrl"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "EventQueue",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "DeadLetterQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "UnauthorizedRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Ref": "TrustedPrincipalArn"
+                }
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "QueueLeastPrivilege",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Deny",
+                  "Action": "sqs:*",
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "RequestQueue",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "EventQueue",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "DeadLetterQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "RequestQueuePolicy": {
+      "Type": "AWS::SQS::QueuePolicy",
+      "Properties": {
+        "Queues": [
+          {
+            "Ref": "RequestQueue"
+          }
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "DenyUnapprovedSender",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "sqs:SendMessage",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "RequestQueue",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": {
+                    "Fn::GetAtt": [
+                      "ProducerRole",
+                      "Arn"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "DenyUnapprovedConsumer",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:ChangeMessageVisibility"
+              ],
+              "Resource": {
+                "Fn::GetAtt": [
+                  "RequestQueue",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": {
+                    "Fn::GetAtt": [
+                      "WalletRole",
+                      "Arn"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "EventQueuePolicy": {
+      "Type": "AWS::SQS::QueuePolicy",
+      "Properties": {
+        "Queues": [
+          {
+            "Ref": "EventQueue"
+          }
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "DenyUnapprovedSender",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "sqs:SendMessage",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "EventQueue",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": {
+                    "Fn::GetAtt": [
+                      "WalletRole",
+                      "Arn"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "DenyUnapprovedConsumer",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:ChangeMessageVisibility"
+              ],
+              "Resource": {
+                "Fn::GetAtt": [
+                  "EventQueue",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": {
+                    "Fn::GetAtt": [
+                      "EventReaderRole",
+                      "Arn"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "DeadLetterQueuePolicy": {
+      "Type": "AWS::SQS::QueuePolicy",
+      "Properties": {
+        "Queues": [
+          {
+            "Ref": "DeadLetterQueue"
+          }
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "DenyUnapprovedDLQConsumer",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:ChangeMessageVisibility"
+              ],
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeadLetterQueue",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": {
+                    "Fn::GetAtt": [
+                      "EventReaderRole",
+                      "Arn"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "RequestQueueUrl": {
+      "Value": {
+        "Ref": "RequestQueue"
+      }
+    },
+    "EventQueueUrl": {
+      "Value": {
+        "Ref": "EventQueue"
+      }
+    },
+    "DeadLetterQueueUrl": {
+      "Value": {
+        "Ref": "DeadLetterQueue"
+      }
+    },
+    "ProducerRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "ProducerRole",
+          "Arn"
+        ]
+      }
+    },
+    "WalletRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "WalletRole",
+          "Arn"
+        ]
+      }
+    },
+    "EventReaderRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "EventReaderRole",
+          "Arn"
+        ]
+      }
+    },
+    "UnauthorizedRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "UnauthorizedRole",
+          "Arn"
+        ]
+      }
+    }
+  }
+}

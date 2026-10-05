@@ -3,7 +3,7 @@ package application
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 )
 
@@ -33,7 +33,7 @@ func (w *PendingReferenceWorker) Run(
 		)
 	}
 
-	log.Printf("pending reference worker started")
+	slog.Info("pending reference worker started")
 
 	for {
 		select {
@@ -48,10 +48,7 @@ func (w *PendingReferenceWorker) Run(
 			pendingReferenceLeaseSeconds,
 		)
 		if err != nil {
-			log.Printf(
-				"pending reference worker error: %v",
-				err,
-			)
+			slog.Error("pending reference failed", "error", err)
 
 			if !waitPendingReferenceWorker(
 				ctx,

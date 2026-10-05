@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: jungle
       POSTGRES_PASSWORD: jungle
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - jungle_wallet_postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -24,7 +24,7 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
     ports:
-      - "8081:8080"
+      - "127.0.0.1:8081:8080"
     volumes:
       - ./deploy/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
 
@@ -35,7 +35,7 @@ services:
       SERVICES: sqs
       AWS_DEFAULT_REGION: us-east-1
     ports:
-      - "4566:4566"
+      - "127.0.0.1:4566:4566"
     volumes:
       - ./deploy/localstack/init-sqs.sh:/etc/localstack/init/ready.d/init-sqs.sh:ro
     healthcheck:
@@ -47,6 +47,35 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+
+  migrate:
+    profiles: ["app"]
+    build: .
+    network_mode: host
+    command: ["migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://jungle:jungle@localhost:5432/jungle_wallet?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  wallet:
+    profiles: ["app"]
+    build: .
+    network_mode: host
+    restart: on-failure
+    environment:
+      DATABASE_URL: postgres://jungle:jungle@localhost:5432/jungle_wallet?sslmode=disable
+      OIDC_ISSUER_URL: http://localhost:8081/realms/jungle-wallet
+      HTTP_ADDRESS: ":8080"
+      INTERNAL_CLIENT_ID: wallet-internal
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_started
+      localstack:
+        condition: service_healthy
 
 volumes:
   jungle_wallet_postgres_data:

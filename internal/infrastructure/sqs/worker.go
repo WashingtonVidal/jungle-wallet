@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"jungle-wallet/internal/observability"
+	"log/slog"
+	"strconv"
 	"time"
 
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -36,21 +39,22 @@ func (w *Worker) Run(ctx context.Context) error {
 		return fmt.Errorf("SQS worker is not initialized")
 	}
 
-	log.Printf("SQS consumer started queue=%s", w.queueURL)
+	slog.Info("SQS consumer started", "queue", w.queueURL)
 
 	for {
 		if err := ctx.Err(); err != nil {
-			log.Printf("SQS consumer stopped")
+			slog.Info("SQS consumer stopped")
 			return nil
 		}
 
 		output, err := w.client.ReceiveMessage(
 			ctx,
 			&awssqs.ReceiveMessageInput{
-				QueueUrl:            &w.queueURL,
-				MaxNumberOfMessages: 1,
-				WaitTimeSeconds:     20,
-				VisibilityTimeout:   30,
+				QueueUrl:                    &w.queueURL,
+				MaxNumberOfMessages:         1,
+				WaitTimeSeconds:             20,
+				VisibilityTimeout:           30,
+				MessageSystemAttributeNames: []types.MessageSystemAttributeName{types.MessageSystemAttributeNameApproximateReceiveCount},
 			},
 		)
 		if err != nil {
@@ -58,7 +62,7 @@ func (w *Worker) Run(ctx context.Context) error {
 				return nil
 			}
 
-			log.Printf("receive SQS message: %v", err)
+			slog.Error("SQS receive failed", "error", err)
 
 			select {
 			case <-ctx.Done():
@@ -70,11 +74,28 @@ func (w *Worker) Run(ctx context.Context) error {
 
 		for _, message := range output.Messages {
 			if err := w.consumer.ProcessMessage(ctx, message); err != nil {
-				log.Printf(
-					"process SQS message message_id=%s error=%v",
-					stringValue(message.MessageId),
-					err,
-				)
+				observability.Inc("sqs_retries")
+				count, _ := strconv.Atoi(message.Attributes["ApproximateReceiveCount"])
+				if count >= 5 {
+					observability.Inc("dlq_candidates")
+				}
+				delay := int32(1)
+				for i := 1; i < count && delay < 30; i++ {
+					delay *= 2
+				}
+				if delay > 30 {
+					delay = 30
+				}
+				// A canceled in-flight attempt releases work for another instance.
+				retryCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				if ctx.Err() != nil {
+					delay = 0
+				}
+				if message.ReceiptHandle != nil {
+					_, _ = w.client.ChangeMessageVisibility(retryCtx, &awssqs.ChangeMessageVisibilityInput{QueueUrl: &w.queueURL, ReceiptHandle: message.ReceiptHandle, VisibilityTimeout: delay})
+				}
+				cancel()
+				slog.Error("SQS processing failed", "messageId", stringValue(message.MessageId), "error", err)
 
 				// Do not delete failed messages.
 				// SQS will make them visible again after the
@@ -84,10 +105,8 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 
 			if message.ReceiptHandle == nil {
-				log.Printf(
-					"SQS message has no receipt handle message_id=%s",
-					stringValue(message.MessageId),
-				)
+				slog.Error("SQS receipt missing", "messageId", stringValue(message.MessageId))
+
 				continue
 			}
 
@@ -103,19 +122,13 @@ func (w *Worker) Run(ctx context.Context) error {
 					return nil
 				}
 
-				log.Printf(
-					"delete SQS message message_id=%s error=%v",
-					stringValue(message.MessageId),
-					err,
-				)
+				slog.Error("SQS delete failed", "messageId", stringValue(message.MessageId), "error", err)
 
 				continue
 			}
 
-			log.Printf(
-				"SQS message processed message_id=%s",
-				stringValue(message.MessageId),
-			)
+			slog.Info("SQS processed", "messageId", stringValue(message.MessageId))
+
 		}
 	}
 }

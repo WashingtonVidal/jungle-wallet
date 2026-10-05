@@ -5,7 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"jungle-wallet/internal/observability"
+	"log/slog"
 	"time"
 
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -26,6 +27,9 @@ type Publisher struct {
 }
 
 type outboxEnvelope struct {
+	Version       int             `json:"version"`
+	CorrelationID string          `json:"correlationId"`
+	CausationID   string          `json:"causationId,omitempty"`
 	EventID       string          `json:"eventId"`
 	EventType     string          `json:"eventType"`
 	AggregateType string          `json:"aggregateType"`
@@ -58,7 +62,7 @@ func (p *Publisher) Run(ctx context.Context) error {
 		return fmt.Errorf("outbox publisher is not initialized")
 	}
 
-	log.Printf("outbox publisher started queue=%s", p.queueURL)
+	slog.Info("outbox publisher started", "queue", p.queueURL)
 
 	for {
 		err := p.publishNext(ctx)
@@ -82,7 +86,7 @@ func (p *Publisher) Run(ctx context.Context) error {
 			return nil
 
 		default:
-			log.Printf("outbox publisher error: %v", err)
+			slog.Error("outbox publisher failed", "error", err)
 
 			timer := time.NewTimer(outboxPollInterval)
 
@@ -107,9 +111,21 @@ func (p *Publisher) publishNext(ctx context.Context) error {
 		return err
 	}
 
+	var snapshot struct {
+		TransactionID string `json:"transactionId"`
+	}
+	if err := json.Unmarshal(message.Payload, &snapshot); err != nil {
+		return p.failMessage(ctx, message, fmt.Errorf("invalid outbox snapshot: %w", err))
+	}
+	correlation := snapshot.TransactionID
+	if correlation == "" {
+		correlation = message.AggregateID
+	}
 	envelope := outboxEnvelope{
+		Version:       1,
+		CorrelationID: correlation,
 		EventID:       message.ID,
-		EventType:     message.EventType,
+		EventType:     externalEventType(message.EventType),
 		AggregateType: message.AggregateType,
 		AggregateID:   message.AggregateID,
 		OccurredAt:    message.CreatedAt.UTC(),
@@ -118,6 +134,7 @@ func (p *Publisher) publishNext(ctx context.Context) error {
 
 	body, err := json.Marshal(envelope)
 	if err != nil {
+		observability.Inc("outbox_retries")
 		return p.failMessage(
 			ctx,
 			message,
@@ -135,6 +152,7 @@ func (p *Publisher) publishNext(ctx context.Context) error {
 		},
 	)
 	if err != nil {
+		observability.Inc("outbox_retries")
 		return p.failMessage(
 			ctx,
 			message,
@@ -151,11 +169,7 @@ func (p *Publisher) publishNext(ctx context.Context) error {
 		return fmt.Errorf("mark published: %w", err)
 	}
 
-	log.Printf(
-		"outbox message published id=%s event=%s",
-		message.ID,
-		message.EventType,
-	)
+	slog.Info("outbox published", "eventId", message.ID, "transactionId", message.AggregateID, "eventType", message.EventType)
 
 	return nil
 }
@@ -202,4 +216,19 @@ func retryBackoff(attempts int) time.Duration {
 
 func stringPointer(value string) *string {
 	return &value
+}
+
+func externalEventType(value string) string {
+	switch value {
+	case "WAGER_TRANSACTION_PROCESSED":
+		return "WagerTransactionProcessed"
+	case "WAGER_TRANSACTION_REJECTED":
+		return "WagerTransactionRejected"
+	case "WAGER_TRANSACTION_PENDING_REFERENCE":
+		return "WagerTransactionPendingReference"
+	case "WALLET_BALANCE_CHANGED":
+		return "WalletBalanceChanged"
+	default:
+		return value
+	}
 }

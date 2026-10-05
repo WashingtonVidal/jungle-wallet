@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"jungle-wallet/internal/application"
 	"jungle-wallet/internal/domain"
@@ -18,7 +19,8 @@ type createWalletRequest struct {
 }
 
 type createWalletResponse struct {
-	WalletID string       `json:"walletId"`
+	WalletID string       `json:"id"`
+	Version  int64        `json:"version"`
 	PlayerID string       `json:"playerId"`
 	Balance  domain.Money `json:"balance"`
 }
@@ -50,10 +52,7 @@ func (h *WalletHandler) Create(
 
 	var request createWalletRequest
 
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-
-	if err := decoder.Decode(&request); err != nil {
+	if err := decodeBody(w, r, &request); err != nil {
 		http.Error(
 			w,
 			"invalid JSON body",
@@ -82,7 +81,10 @@ func (h *WalletHandler) Create(
 		},
 	)
 	if err != nil {
+		var pgErr *pgconn.PgError
 		switch {
+		case errors.As(err, &pgErr) && pgErr.Code == "23505":
+			http.Error(w, "wallet already exists", http.StatusConflict)
 		case errors.Is(err, domain.ErrInvalid),
 			errors.Is(err, domain.ErrCurrency):
 			http.Error(
@@ -114,6 +116,7 @@ func (h *WalletHandler) Create(
 
 	response := createWalletResponse{
 		WalletID: walletState.ID,
+		Version:  walletState.Version,
 		PlayerID: walletState.PlayerID,
 		Balance:  walletState.Balance,
 	}

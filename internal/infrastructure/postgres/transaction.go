@@ -2,7 +2,11 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5/pgconn"
+	"jungle-wallet/internal/domain"
+	"jungle-wallet/internal/observability"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -31,6 +35,15 @@ func (db *DB) WithTx(
 	}()
 
 	if err := fn(tx); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			if pgErr.Code == "40P01" || pgErr.Code == "40001" {
+				observability.Inc("concurrency_conflicts")
+			}
+			if pgErr.Code == "23505" && (pgErr.ConstraintName == "wager_transactions_provider_external_unique" || pgErr.ConstraintName == "wager_transactions_provider_idempotency_unique") {
+				return fmt.Errorf("%w: concurrent identity collision", domain.ErrIdempotencyConflict)
+			}
+		}
 		return err
 	}
 

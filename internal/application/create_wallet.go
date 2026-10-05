@@ -55,7 +55,7 @@ func (s *CreateWalletService) Execute(
 	if input.ID == "" ||
 		input.PlayerID == "" ||
 		input.CreatedAt.IsZero() {
-		return nil, fmt.Errorf("invalid create wallet input")
+		return nil, fmt.Errorf("%w: invalid create wallet input", domain.ErrInvalid)
 	}
 
 	if err := input.InitialBalance.ValidateExternal(); err != nil {
@@ -121,14 +121,8 @@ func (s *CreateWalletService) Execute(
 			return err
 		}
 
-		processedPayload, err := json.Marshal(map[string]any{
-			"transactionId": opening.ID(),
-			"walletId":      input.ID,
-			"playerId":      input.PlayerID,
-			"kind":          opening.Kind(),
-			"status":        opening.Status(),
-			"occurredAt":    input.CreatedAt.UTC(),
-		})
+		processedPayload, err := json.Marshal(wagerProcessedEvent{TransactionID: opening.ID(), WalletID: input.ID, PlayerID: input.PlayerID, Kind: opening.Kind(), Status: opening.Status(), OccurredAt: input.CreatedAt.UTC()})
+
 		if err != nil {
 			return err
 		}
@@ -149,12 +143,7 @@ func (s *CreateWalletService) Execute(
 			return err
 		}
 
-		balancePayload, err := json.Marshal(map[string]any{
-			"walletId":   input.ID,
-			"playerId":   input.PlayerID,
-			"balance":    input.InitialBalance,
-			"occurredAt": input.CreatedAt.UTC(),
-		})
+		balancePayload, err := json.Marshal(balanceChangedEvent{WalletID: input.ID, TransactionID: opening.ID(), Direction: domain.LedgerCredit, Money: input.InitialBalance, BalanceBefore: zero, BalanceAfter: input.InitialBalance, WalletVersion: 1})
 		if err != nil {
 			return err
 		}

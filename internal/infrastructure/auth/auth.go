@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"jungle-wallet/internal/config"
@@ -91,7 +92,10 @@ func NewFromConfig(cfg *config.Config) (*Authenticator, error) {
 		return nil, fmt.Errorf("config is required")
 	}
 
-	return NewAuthenticator(context.Background(), cfg.OIDCIssuerURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ctx = oidc.ClientContext(ctx, &http.Client{Timeout: 10 * time.Second})
+	return NewAuthenticator(ctx, cfg.OIDCIssuerURL)
 }
 
 type contextKey string

@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -23,6 +24,9 @@ func New(ctx context.Context, databaseURL string) (*DB, error) {
 		return nil, fmt.Errorf("parse database config: %w", err)
 	}
 
+	if config.ConnConfig.ConnectTimeout == 0 {
+		config.ConnConfig.ConnectTimeout = 5 * time.Second
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("create database pool: %w", err)

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var ErrInboxMessageNotFound = errors.New("inbox message not found")
@@ -57,32 +56,17 @@ func (r *InboxRepository) Register(
 	}
 
 	if err := r.Insert(ctx, q, message); err != nil {
-		var pgErr *pgconn.PgError
-
-		if !errors.As(err, &pgErr) ||
-			pgErr.Code != "23505" ||
-			pgErr.ConstraintName != "inbox_consumer_message_unique" {
-			return nil, false, err
-		}
-
-		existing, findErr := r.FindByConsumerAndMessageID(
-			ctx,
-			q,
-			message.ConsumerName,
-			message.MessageID,
-		)
-		if findErr != nil {
-			return nil, false, findErr
-		}
-
-		if existing.PayloadHash != message.PayloadHash {
-			return nil, false, ErrInboxPayloadConflict
-		}
-
-		return existing, true, nil
+		return nil, false, err
 	}
+	existing, err = r.FindByConsumerAndMessageID(ctx, q, message.ConsumerName, message.MessageID)
+	if err != nil {
+		return nil, false, err
+	}
+	if existing.PayloadHash != message.PayloadHash {
+		return nil, false, ErrInboxPayloadConflict
+	}
+	return existing, existing.ID != message.ID, nil
 
-	return &message, false, nil
 }
 
 func (r *InboxRepository) Insert(
@@ -119,6 +103,7 @@ func (r *InboxRepository) Insert(
 			$1, $2, $3, $4, $5,
 			$6, $7, $8, $9, $10
 		)
+        ON CONFLICT (consumer_name,message_id) DO NOTHING
 		`,
 		message.ID,
 		message.ConsumerName,

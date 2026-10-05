@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"jungle-wallet/internal/testsupport"
 	"testing"
 	"time"
 )
 
-const inboxTestDatabaseURL = "postgres://jungle:jungle@localhost:5432/jungle_wallet?sslmode=disable"
+var inboxTestDatabaseURL = testsupport.DatabaseURL()
 
 func TestInboxRepositoryLifecycleIntegration(t *testing.T) {
 	ctx := context.Background()

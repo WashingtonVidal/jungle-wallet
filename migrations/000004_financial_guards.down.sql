@@ -1,0 +1,3 @@
+DROP INDEX wager_transactions_bet_return_unique;
+DROP INDEX wager_transactions_reversal_unique;
+DROP INDEX wager_transactions_opening_wallet_unique;

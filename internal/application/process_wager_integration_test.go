@@ -2,7 +2,7 @@ package application
 
 import (
 	"context"
-	"errors"
+	"jungle-wallet/internal/testsupport"
 	"testing"
 	"time"
 
@@ -10,7 +10,7 @@ import (
 	"jungle-wallet/internal/infrastructure/postgres"
 )
 
-const testDatabaseURL = "postgres://jungle:jungle@localhost:5432/jungle_wallet?sslmode=disable"
+var testDatabaseURL = testsupport.DatabaseURL()
 
 func TestProcessWagerBETIntegration(t *testing.T) {
 	ctx := context.Background()
@@ -385,9 +385,9 @@ func TestProcessWagerBETIdempotentReplay(t *testing.T) {
 		t.Fatalf("count outbox messages: %v", err)
 	}
 
-	if outboxCount != 1 {
+	if outboxCount != 2 {
 		t.Fatalf(
-			"expected 1 outbox message after replay, got %d",
+			"expected 2 outbox messages after replay, got %d",
 			outboxCount,
 		)
 	}
@@ -487,12 +487,14 @@ func TestProcessWagerConcurrentBetsDoNotOverspend(t *testing.T) {
 	}
 
 	start := make(chan struct{})
+	resultsCh := make(chan *ProcessWagerResult, 2)
 	errorsCh := make(chan error, 2)
 
 	run := func(input ProcessWagerInput) {
 		<-start
 
-		_, err := service.Execute(ctx, input)
+		result, err := service.Execute(ctx, input)
+		resultsCh <- result
 		errorsCh <- err
 	}
 
@@ -504,37 +506,32 @@ func TestProcessWagerConcurrentBetsDoNotOverspend(t *testing.T) {
 	errA := <-errorsCh
 	errB := <-errorsCh
 
-	successes := 0
-	insufficient := 0
-
-	for _, processErr := range []error{errA, errB} {
-		switch {
-		case processErr == nil:
+	if errA != nil || errB != nil {
+		t.Fatalf("unexpected I/O errors: %v, %v", errA, errB)
+	}
+	successes, rejections := 0, 0
+	for i := 0; i < 2; i++ {
+		result := <-resultsCh
+		switch result.Transaction.Status() {
+		case domain.WagerTransactionStatusProcessed:
 			successes++
-
-		case errors.Is(processErr, domain.ErrInsufficient):
-			insufficient++
-
+		case domain.WagerTransactionStatusRejected:
+			if result.Transaction.FailureCode() != "INSUFFICIENT_BALANCE" {
+				t.Fatal(result.Transaction.FailureCode())
+			}
+			rejections++
 		default:
-			t.Fatalf(
-				"unexpected concurrent processing error: %v",
-				processErr,
-			)
+			t.Fatalf("unexpected status %s", result.Transaction.Status())
 		}
 	}
-
-	if successes != 1 {
-		t.Fatalf(
-			"expected exactly 1 successful BET, got %d",
-			successes,
-		)
+	if successes != 1 || rejections != 1 {
+		t.Fatalf("expected one processed and one durably rejected, got %d/%d", successes, rejections)
 	}
-
-	if insufficient != 1 {
-		t.Fatalf(
-			"expected exactly 1 insufficient balance error, got %d",
-			insufficient,
-		)
+	for _, input := range []ProcessWagerInput{inputA, inputB} {
+		replay, err := service.Execute(ctx, input)
+		if err != nil || !replay.Replay {
+			t.Fatalf("expected stable replay: %v", err)
+		}
 	}
 
 	var balanceUnits int64
@@ -569,9 +566,9 @@ func TestProcessWagerConcurrentBetsDoNotOverspend(t *testing.T) {
 		t.Fatalf("count transactions: %v", err)
 	}
 
-	if transactionCount != 1 {
+	if transactionCount != 2 {
 		t.Fatalf(
-			"expected exactly 1 persisted transaction, got %d",
+			"expected exactly 2 persisted transactions, got %d",
 			transactionCount,
 		)
 	}
@@ -603,9 +600,9 @@ func TestProcessWagerConcurrentBetsDoNotOverspend(t *testing.T) {
 		t.Fatalf("count outbox messages: %v", err)
 	}
 
-	if outboxCount != 1 {
+	if outboxCount != 3 {
 		t.Fatalf(
-			"expected exactly 1 outbox message, got %d",
+			"expected exactly 3 outbox messages, got %d",
 			outboxCount,
 		)
 	}
@@ -805,9 +802,9 @@ func TestProcessWagerSameBetFiftyTimesConcurrently(t *testing.T) {
 		t.Fatalf("count outbox messages: %v", err)
 	}
 
-	if outboxCount != 1 {
+	if outboxCount != 2 {
 		t.Fatalf(
-			"expected exactly 1 outbox message, got %d",
+			"expected exactly 2 outbox messages, got %d",
 			outboxCount,
 		)
 	}
@@ -1021,9 +1018,9 @@ func TestProcessWagerDifferentWalletsConcurrently(t *testing.T) {
 		t.Fatalf("count outbox messages: %v", err)
 	}
 
-	if outboxCount != 2 {
+	if outboxCount != 4 {
 		t.Fatalf(
-			"expected exactly 2 outbox messages, got %d",
+			"expected exactly 4 outbox messages, got %d",
 			outboxCount,
 		)
 	}

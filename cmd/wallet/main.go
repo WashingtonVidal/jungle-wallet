@@ -2,6 +2,9 @@ package main
 
 import (
 	"go.uber.org/fx"
+	"go.uber.org/fx/fxevent"
+	"log/slog"
+	"os"
 
 	"jungle-wallet/internal/application"
 	"jungle-wallet/internal/config"
@@ -12,7 +15,12 @@ import (
 )
 
 func main() {
-	fx.New(
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	fx.New(walletModule(), fx.WithLogger(func() fxevent.Logger { return &fxevent.SlogLogger{Logger: slog.Default()} })).Run()
+}
+
+func walletModule() fx.Option {
+	return fx.Module("wallet",
 		fx.Provide(
 			config.New,
 			postgres.NewFromConfig,
@@ -35,14 +43,15 @@ func main() {
 
 			httpserver.NewWagerHandler,
 			httpserver.NewWalletHandler,
+			httpserver.NewQueryHandler,
 			httpserver.NewMux,
 			httpserver.NewServer,
 		),
 		fx.Invoke(
 			postgres.RegisterDB,
-			httpserver.RegisterLifecycle,
 			sqs.RegisterLifecycle,
 			application.RegisterLifecycle,
+			httpserver.RegisterLifecycle,
 		),
-	).Run()
+	)
 }

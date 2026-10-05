@@ -1,11 +1,10 @@
 package httpserver
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,10 +27,11 @@ type processWagerRequest struct {
 }
 
 type processWagerResponse struct {
-	TransactionID    string       `json:"transactionId"`
-	Status           string       `json:"status"`
-	Balance          domain.Money `json:"balance"`
-	IdempotentReplay bool         `json:"idempotentReplay"`
+	TransactionID    string        `json:"transactionId"`
+	Status           string        `json:"status"`
+	FailureCode      string        `json:"failureCode,omitempty"`
+	Balance          *domain.Money `json:"balance,omitempty"`
+	IdempotentReplay bool          `json:"idempotentReplay"`
 }
 
 type WagerHandler struct {
@@ -60,10 +60,7 @@ func (h *WagerHandler) Process(w http.ResponseWriter, r *http.Request) {
 
 	var request processWagerRequest
 
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-
-	if err := decoder.Decode(&request); err != nil {
+	if err := decodeBody(w, r, &request); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
@@ -79,6 +76,12 @@ func (h *WagerHandler) Process(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	for _, v := range []string{request.ExternalTransactionID, request.ProviderID, request.PlayerID, request.WalletID, request.RoundID, request.GameID, idempotencyKey} {
+		if strings.TrimSpace(v) == "" {
+			writeJSONError(w, 400, "incomplete wager input")
+			return
+		}
+	}
 	money, err := request.Money.Parse()
 	if err != nil {
 		http.Error(w, "invalid money", http.StatusBadRequest)
@@ -91,7 +94,7 @@ func (h *WagerHandler) Process(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payloadHash, err := wagerPayloadHash(request)
+	payloadHash, legacyHash, err := wagerPayloadHashes(request)
 	if err != nil {
 		http.Error(w, "could not calculate payload hash", http.StatusInternalServerError)
 		return
@@ -109,6 +112,7 @@ func (h *WagerHandler) Process(w http.ResponseWriter, r *http.Request) {
 			ProviderID:                     request.ProviderID,
 			IdempotencyKey:                 idempotencyKey,
 			PayloadHash:                    payloadHash,
+			LegacyPayloadHash:              legacyHash,
 			ReferenceExternalTransactionID: request.ReferenceExternalTransactionID,
 			PlayerID:                       request.PlayerID,
 			RoundID:                        request.RoundID,
@@ -120,15 +124,17 @@ func (h *WagerHandler) Process(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		switch {
+		case errors.Is(err, domain.ErrIdempotencyConflict):
+			http.Error(w, err.Error(), http.StatusConflict)
 		case errors.Is(err, domain.ErrInvalid),
-			errors.Is(err, domain.ErrInvalidTransactionKind):
+			errors.Is(err, domain.ErrInvalidTransactionKind), errors.Is(err, domain.ErrInvalidTransaction), errors.Is(err, domain.ErrCurrency):
 			http.Error(w, err.Error(), http.StatusBadRequest)
 
 		case errors.Is(err, domain.ErrInsufficient):
 			http.Error(w, err.Error(), http.StatusConflict)
 
 		default:
-			http.Error(w, "internal server error", http.StatusInternalServerError)
+			http.Error(w, "internal server error", http.StatusServiceUnavailable)
 		}
 		return
 	}
@@ -136,25 +142,29 @@ func (h *WagerHandler) Process(w http.ResponseWriter, r *http.Request) {
 	transaction := result.Transaction
 
 	resultBalance := transaction.ResultBalance()
-	if resultBalance == nil {
-		http.Error(w, "transaction has no resulting balance", http.StatusInternalServerError)
-		return
-	}
 
 	response := processWagerResponse{
 		TransactionID:    transaction.ID(),
 		Status:           string(transaction.Status()),
-		Balance:          *resultBalance,
+		Balance:          resultBalance,
+		FailureCode:      transaction.FailureCode(),
 		IdempotentReplay: result.Replay,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	status := http.StatusOK
+	if transaction.Status() == domain.WagerTransactionStatusPendingReference {
+		status = http.StatusAccepted
+	}
+	if transaction.Status() == domain.WagerTransactionStatusRejected {
+		status = http.StatusUnprocessableEntity
+	}
+	w.WriteHeader(status)
 
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-func wagerPayloadHash(request processWagerRequest) (string, error) {
+func wagerPayloadHashes(request processWagerRequest) (string, string, error) {
 	// This struct is the canonical business representation used for
 	// idempotency. Transport metadata such as Idempotency-Key is excluded.
 	canonical := struct {
@@ -181,12 +191,10 @@ func wagerPayloadHash(request processWagerRequest) (string, error) {
 
 	data, err := json.Marshal(canonical)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
-	sum := sha256.Sum256(data)
-
-	return hex.EncodeToString(sum[:]), nil
+	return domain.CanonicalPayloadHash(data)
 }
 
 func parseWagerKind(value string) (domain.WagerTransactionKind, error) {

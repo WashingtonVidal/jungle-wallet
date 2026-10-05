@@ -29,6 +29,7 @@ const (
 )
 
 var (
+	ErrIdempotencyConflict      = errors.New("idempotency conflict")
 	ErrInvalidTransactionKind   = errors.New("invalid wager transaction kind")
 	ErrInvalidTransactionStatus = errors.New("invalid wager transaction status")
 	ErrInvalidTransaction       = errors.New("invalid wager transaction")
@@ -188,6 +189,19 @@ func NewWagerTransaction(params NewWagerTransactionParams) (*WagerTransaction, e
 }
 
 func RehydrateWagerTransaction(params RehydrateWagerTransactionParams) (*WagerTransaction, error) {
+	if err := params.Money.ValidateExternal(); err != nil {
+		return nil, err
+	}
+	if params.ResultBalance != nil {
+		if err := params.ResultBalance.ValidateExternal(); err != nil {
+			return nil, err
+		}
+		if params.ResultBalance.Currency() != params.Money.Currency() {
+			return nil, ErrCurrency
+		}
+		balance := *params.ResultBalance
+		params.ResultBalance = &balance
+	}
 	if !params.Kind.IsValid() {
 		return nil, ErrInvalidTransactionKind
 	}
@@ -204,6 +218,28 @@ func RehydrateWagerTransaction(params RehydrateWagerTransactionParams) (*WagerTr
 		return nil, ErrInvalidTransaction
 	}
 
+	if params.UpdatedAt.Before(params.CreatedAt) {
+		return nil, ErrInvalidTransaction
+	}
+	if params.Kind == WagerTransactionKindOpening {
+		if params.ExternalTransactionID != "" || params.ProviderID != "" || params.IdempotencyKey != "" || params.PayloadHash != "" || params.RoundID != "" || params.GameID != "" || params.ReferenceExternalTransactionID != "" || params.ReferenceTransactionID != "" {
+			return nil, ErrInvalidTransaction
+		}
+		if params.Money.Units() <= 0 || params.Status != WagerTransactionStatusProcessed {
+			return nil, ErrInvalidTransaction
+		}
+	} else {
+		_, err := NewWagerTransaction(NewWagerTransactionParams{ID: params.ID, ExternalTransactionID: params.ExternalTransactionID, ProviderID: params.ProviderID, IdempotencyKey: params.IdempotencyKey, PayloadHash: params.PayloadHash, WalletID: params.WalletID, PlayerID: params.PlayerID, RoundID: params.RoundID, GameID: params.GameID, Kind: params.Kind, Money: params.Money, ReferenceExternalTransactionID: params.ReferenceExternalTransactionID, CreatedAt: params.CreatedAt})
+		if err != nil {
+			return nil, err
+		}
+	}
+	if params.Status == WagerTransactionStatusProcessed && params.ResultBalance == nil {
+		return nil, ErrInvalidTransaction
+	}
+	if (params.Status == WagerTransactionStatusRejected || params.Status == WagerTransactionStatusFailed) && strings.TrimSpace(params.FailureCode) == "" {
+		return nil, ErrFailureCodeRequired
+	}
 	return &WagerTransaction{
 		id:                             params.ID,
 		externalTransactionID:          params.ExternalTransactionID,
@@ -318,6 +354,9 @@ func (s WagerTransactionStatus) IsTerminal() bool {
 }
 
 func (t *WagerTransaction) ensureNotTerminal() error {
+	if t == nil || t.id == "" || !t.money.Valid() || !t.status.IsValid() {
+		return ErrInvalidTransaction
+	}
 	if t.status.IsTerminal() {
 		return ErrTerminalTransaction
 	}
@@ -330,7 +369,7 @@ func (t *WagerTransaction) MarkPendingReference(updatedAt time.Time) error {
 		return err
 	}
 
-	if updatedAt.IsZero() {
+	if updatedAt.IsZero() || updatedAt.Before(t.createdAt) {
 		return ErrInvalidTransaction
 	}
 
@@ -345,10 +384,16 @@ func (t *WagerTransaction) MarkProcessed(resultBalance Money, updatedAt time.Tim
 		return err
 	}
 
-	if updatedAt.IsZero() {
+	if updatedAt.IsZero() || updatedAt.Before(t.createdAt) {
 		return ErrInvalidTransaction
 	}
 
+	if err := resultBalance.ValidateExternal(); err != nil {
+		return err
+	}
+	if resultBalance.Currency() != t.money.Currency() {
+		return ErrCurrency
+	}
 	t.status = WagerTransactionStatusProcessed
 	t.failureCode = ""
 	t.resultBalance = &resultBalance
@@ -366,7 +411,7 @@ func (t *WagerTransaction) Reject(failureCode string, updatedAt time.Time) error
 		return ErrFailureCodeRequired
 	}
 
-	if updatedAt.IsZero() {
+	if updatedAt.IsZero() || updatedAt.Before(t.createdAt) {
 		return ErrInvalidTransaction
 	}
 
@@ -386,7 +431,7 @@ func (t *WagerTransaction) Fail(failureCode string, updatedAt time.Time) error {
 		return ErrFailureCodeRequired
 	}
 
-	if updatedAt.IsZero() {
+	if updatedAt.IsZero() || updatedAt.Before(t.createdAt) {
 		return ErrInvalidTransaction
 	}
 
@@ -402,7 +447,7 @@ func (t *WagerTransaction) ResolveReference(transactionID string, updatedAt time
 		return err
 	}
 
-	if strings.TrimSpace(transactionID) == "" || updatedAt.IsZero() {
+	if strings.TrimSpace(transactionID) == "" || updatedAt.IsZero() || updatedAt.Before(t.createdAt) {
 		return ErrInvalidTransaction
 	}
 
@@ -474,7 +519,11 @@ func (t *WagerTransaction) FailureCode() string {
 }
 
 func (t *WagerTransaction) ResultBalance() *Money {
-	return t.resultBalance
+	if t.resultBalance == nil {
+		return nil
+	}
+	balance := *t.resultBalance
+	return &balance
 }
 
 func (t *WagerTransaction) CreatedAt() time.Time {

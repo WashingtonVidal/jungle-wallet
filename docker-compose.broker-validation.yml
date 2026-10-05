@@ -1,0 +1,21 @@
+name: jungle-wallet-broker-validation
+services:
+  localstack-probe:
+    image: localstack/localstack:4@sha256:3ebc37595918b8accb852f8048fef2aff047d465167edd655528065b07bc364a
+    container_name: jungle-wallet-localstack-policy-probe
+    environment:
+      SERVICES: sqs,iam
+      ENFORCE_IAM: "1"
+    ports:
+      - "127.0.0.1:4567:4566"
+    volumes:
+      - ./scripts/probe-broker-authorization.py:/validation/probe.py:ro
+  ministack-probe:
+    image: ministackorg/ministack:1.5.21@sha256:7a30ff0670578e10528b5a9a21e795ef494f96bbc35691c9b0742ea35de71808
+    container_name: jungle-wallet-ministack-policy-probe
+    environment:
+      AUTH: "true"
+    ports:
+      - "127.0.0.1:4569:4566"
+    volumes:
+      - ./scripts/probe-broker-authorization.py:/validation/probe.py:ro

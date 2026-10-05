@@ -6,9 +6,10 @@ import (
 )
 
 type Config struct {
-	DatabaseURL   string
-	HTTPAddress   string
-	OIDCIssuerURL string
+	InternalClientID string
+	DatabaseURL      string
+	HTTPAddress      string
+	OIDCIssuerURL    string
 
 	AWSRegion         string
 	SQSEndpoint       string
@@ -17,6 +18,10 @@ type Config struct {
 }
 
 func New() (*Config, error) {
+	internalClientID := os.Getenv("INTERNAL_CLIENT_ID")
+	if internalClientID == "" {
+		internalClientID = "wallet-internal"
+	}
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
@@ -53,6 +58,7 @@ func New() (*Config, error) {
 	}
 
 	return &Config{
+		InternalClientID:  internalClientID,
 		DatabaseURL:       databaseURL,
 		HTTPAddress:       httpAddress,
 		OIDCIssuerURL:     oidcIssuerURL,
